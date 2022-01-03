@@ -1,4 +1,6 @@
-1- começar o ponto 3
-2- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
+1- apagar todos os mutex cenas relativos à inode_table no state.c: vou trancar isso com rwlock no operations.c
+2- terminar no state.c os mutexes das tabelas FREE/TAKEN
+3- colocar os rwlocks no open_file_entries e no inode_table no operations.c
+4- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
 
 

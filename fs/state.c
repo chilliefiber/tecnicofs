@@ -12,19 +12,26 @@
  * memory; for simplicity, this project maintains it in primary memory) */
 
 /* I-node table */
-static inode_t inode_table[INODE_TABLE_SIZE];
-static char freeinode_ts[INODE_TABLE_SIZE];
+static inode_t inode_table[INODE_TABLE_SIZE]; // 1 trinco por posição
+static char freeinode_ts[INODE_TABLE_SIZE]; // 1 trinco para todo o mapa
 
 /* Data blocks */
-static char fs_data[BLOCK_SIZE * DATA_BLOCKS];
-static char free_blocks[DATA_BLOCKS];
+static char fs_data[BLOCK_SIZE * DATA_BLOCKS]; // sem trinco?
+static char free_blocks[DATA_BLOCKS]; // 1 trinco para todo o mapa
 
 /* Volatile FS state */
 
+// 1 trinco por posição
 static open_file_entry_t open_file_table[MAX_OPEN_FILES]; // aqui o indice corresponde noutras funções ao fhandle: não está relacionado com inumber, é como
                                                           // o stdin é fd 0 mas não tem o inumber 0. penso que isto permita que o mesmo ficheiro tenha diferentes
                                                           // entradas no 3, de modo a permitir concorrência com offsets diferentes
+// 1 trinco para toda a tabela
 static char free_open_file_entries[MAX_OPEN_FILES]; // indice igual ao de cima para a mesma entrada
+
+/* Mutexes for allocation tables */
+pthread_mutex_t freeinode_ts_mutex;
+pthread_mutex_t free_blocks_mutex;
+pthread_mutex_t free_open_file_entries_mutex;
 
 static inline bool valid_inumber(int inumber) {
     return inumber >= 0 && inumber < INODE_TABLE_SIZE;
@@ -70,17 +77,36 @@ static void insert_delay() {
  * Initializes FS state
  */
 void state_init() {
+    pthread_mutex_init(&freeinode_ts_mutex, NULL); // this function always returns 0
+    pthread_mutex_init(&free_blocks_mutex, NULL);
+    pthread_mutex_init(&free_open_file_entries, NULL);
+    
+
+    // Note: in this function, which is only supposed to be called once, I lock the whole iteration  
+    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0)
+        return -1;
     for (size_t i = 0; i < INODE_TABLE_SIZE; i++) {
         freeinode_ts[i] = FREE;
     }
+    if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+        return -1;
 
+
+    if (pthread_mutex_lock(&free_blocks_mutex) != 0)
+        return -1;
     for (size_t i = 0; i < DATA_BLOCKS; i++) {
         free_blocks[i] = FREE;
     }
+    if (pthread_mutex_unlock(&free_blocks_mutex) != 0)
+        return -1;
 
+    if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
+        return -1;
     for (size_t i = 0; i < MAX_OPEN_FILES; i++) {
         free_open_file_entries[i] = FREE;
     }
+    if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0)
+        return -1;
 }
 
 void state_destroy() { /* nothing to do */
@@ -94,6 +120,10 @@ void state_destroy() { /* nothing to do */
  *  new i-node's number if successfully created, -1 otherwise
  */
 int inode_create(inode_type n_type) {
+    // TODO analisar bem esta, visto que é dentro de 1 loop:
+    // devo trancar/destrancar a freeinode_ts iteração a iteração, ou trancar no início e só
+    // destrancar nos returns? a inode_table só faz sentido trancar dentro do Finds first free entry
+    // visto que só nessa única iteração é que é utilizada
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
         if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) {
             insert_delay(); // simulate storage access delay (to freeinode_ts)
@@ -105,20 +135,27 @@ int inode_create(inode_type n_type) {
             // porque é que usamos sizeof(allocation_state_t). eu pensava que os valores
             // FREE/TAKEN seriam auto convertidos para char ao fazer freeinode_ts[inumber] = FREE/TAKEN
         }
-
+        // CRITICAL SECTION START freeinode_ts
+        if (pthread_mutex_lock(&freeinode_ts_mutex) != 0)
+            return -1;
         /* Finds first free entry in i-node table */
         if (freeinode_ts[inumber] == FREE) {
             /* Found a free entry, so takes it for the new i-node*/
             freeinode_ts[inumber] = TAKEN;
             insert_delay(); // simulate storage access delay (to i-node)
+            // CRITICAL SECTION START inode_table for writing
+            if (pthread_mutex_lock(inode_table_mutex[inumber]) != 0) {
+                pthread_mutex_unlock
+            }
             inode_table[inumber].i_node_type = n_type;
-
+            
             if (n_type == T_DIRECTORY) {
                 /* Initializes directory (filling its block with empty
                  * entries, labeled with inumber==-1) */
                 int b = data_block_alloc(); // obter 1 bloco de dados para o diretório
                 if (b == -1) {
                     freeinode_ts[inumber] = FREE;
+                    pthread_mutex_unlock(&freeinode_ts_mutex); // no need to check return value, we'll return an error anyway 
                     return -1; // neste caso não havia blocos de dados disponíveis
                 }
 
@@ -130,8 +167,10 @@ int inode_create(inode_type n_type) {
                 dir_entry_t *dir_entry = (dir_entry_t *)data_block_get(b);
                 if (dir_entry == NULL) { // isto só acontece se b não for um índice válido, que é impossível neste caso
                     freeinode_ts[inumber] = FREE;
+                    pthread_mutex_unlock(&freeinode_ts_mutex);
                     return -1;
                 }
+                // CRITICAL SECTION END freeinode_ts
 
                 // data_block_get devolve o endereço de 1 conjunto de bytes que vai até ao fim de fs_data (não está limitado ao tamanho de 1 bloco)
                 // no entanto, não excedemos a leitura para lá de 1 bloco porque MAX_DIR_ENTRIES dá o nº de dir_entries num bloco
@@ -140,6 +179,7 @@ int inode_create(inode_type n_type) {
                     dir_entry[i].d_inumber = -1;
                 }
             } else {
+                // CRITICAL SECTION END freeinode_ts
                 /* In case of a new file, simply sets its size to 0 */
                 inode_table[inumber].i_size = 0;
                 inode_table[inumber].i_data_blocks[0] = -1;
@@ -148,8 +188,11 @@ int inode_create(inode_type n_type) {
             for (int block_number = 1; block_number < INODE_DIRECT_REFERENCES; block_number++)
                 inode_table[inumber].i_data_blocks[block_number] = -1;
             inode_table[inumber].i_indirect_data_block = -1;
+            // CRITICAL SECTION END inode_table for writing
             return inumber;
         }
+        if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+            return -1;
     }
     return -1;
 }
@@ -165,13 +208,15 @@ int inode_delete(int inumber) {
     insert_delay();
     insert_delay();
 
+    // CRITICAL SECTION START freeinode_ts
     if (!valid_inumber(inumber) || freeinode_ts[inumber] == FREE) {
+        // CRITICAL SECTION END freeinode_ts
         return -1;
     }
 
     freeinode_ts[inumber] = FREE; // possivelmente passar isto para o fim da função, tenho medo que com o paralelismo 
                                   // eu liberte isto e depois ainda não limpei os data blocks e alguém escreve por cima: TODO 3
-
+    // CRITICAL SECTION END freeinode_ts
     return inode_clear_file_contents(&inode_table[inumber]);
 }
 
@@ -463,7 +508,9 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
     }
 
     insert_delay(); // simulate storage access delay to i-node with inumber
+    // CRITICAL SECTION START read inode_table
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
+        // CRITICAL SECTION END read inode_table
         return -1;
     }
 
@@ -474,7 +521,7 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
- 
+    // CRITICAL SECTION END read inode_table 
     if (dir_entry == NULL) {
         return -1;
     }
@@ -500,14 +547,17 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
  */
 int find_in_dir(int inumber, char const *sub_name) { 
     insert_delay(); // simulate storage access delay to i-node with inumber
+    // CRITICAL SECTION START read inode_table
     if (!valid_inumber(inumber) ||
         inode_table[inumber].i_node_type != T_DIRECTORY) {
+        // CRITICAL SECTION END inode_table
         return -1;
     }
 
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
+    // CRITICAL SECTION END inode_table
     if (dir_entry == NULL) {
         return -1;
     }
