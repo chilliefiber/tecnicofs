@@ -54,8 +54,8 @@ typedef struct {
 
 #define MAX_FILE_SIZE (BLOCK_SIZE * (INODE_DIRECT_REFERENCES + MAX_INDIRECT_BLOCKS))  
 
-void state_init();
-void state_destroy();
+int state_init();
+int state_destroy();
 
 int inode_create(inode_type n_type);
 int inode_delete(int inumber);

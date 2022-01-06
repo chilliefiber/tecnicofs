@@ -8,6 +8,7 @@
 4- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
 5- adicionar à estrutura do open_file_entry um indicador de se o modo é append. Nesse caso quando fazemos uma leitura/escrita
 o offset deve ser sempre colocado igual a inode->i_size (de preferencia no operations.c)
+6- os trincos que coloquei no state.c foram lá colocados para limitar ao máximo as secções críticas. Fica mal?
 
 
 Analisei bem a tfs_open e a tfs_write, a read já tinha sono

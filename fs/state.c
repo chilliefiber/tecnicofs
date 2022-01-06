@@ -76,7 +76,7 @@ static void insert_delay() {
 /*
  * Initializes FS state
  */
-void state_init() {
+int state_init() {
     pthread_mutex_init(&freeinode_ts_mutex, NULL); // this function always returns 0
     pthread_mutex_init(&free_blocks_mutex, NULL);
     pthread_mutex_init(&free_open_file_entries, NULL);
@@ -107,9 +107,17 @@ void state_init() {
     }
     if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0)
         return -1;
+    return 0;
 }
 
-void state_destroy() { /* nothing to do */
+int state_destroy() { /* destroys mutexes. will return an error if they are busy */
+    if (pthread_mutex_destroy(&freeinode_ts_mutex) != 0) 
+        return -1;
+    if (pthread_mutex_destroy(&free_blocks_mutex) != 0)
+        return -1;
+    if (pthread_mutex_destroy(&free_open_file_entries_mutex) != 0)
+        return -1;
+    return 0;
 }
 
 /*
@@ -124,6 +132,8 @@ int inode_create(inode_type n_type) {
     // devo trancar/destrancar a freeinode_ts iteração a iteração, ou trancar no início e só
     // destrancar nos returns? a inode_table só faz sentido trancar dentro do Finds first free entry
     // visto que só nessa única iteração é que é utilizada
+    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) // placed here so that we don't lock/unlock every iteration
+        return -1;
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
         if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) {
             insert_delay(); // simulate storage access delay (to freeinode_ts)
@@ -135,18 +145,12 @@ int inode_create(inode_type n_type) {
             // porque é que usamos sizeof(allocation_state_t). eu pensava que os valores
             // FREE/TAKEN seriam auto convertidos para char ao fazer freeinode_ts[inumber] = FREE/TAKEN
         }
-        // CRITICAL SECTION START freeinode_ts
-        if (pthread_mutex_lock(&freeinode_ts_mutex) != 0)
-            return -1;
         /* Finds first free entry in i-node table */
         if (freeinode_ts[inumber] == FREE) {
             /* Found a free entry, so takes it for the new i-node*/
             freeinode_ts[inumber] = TAKEN;
             insert_delay(); // simulate storage access delay (to i-node)
             // CRITICAL SECTION START inode_table for writing
-            if (pthread_mutex_lock(inode_table_mutex[inumber]) != 0) {
-                pthread_mutex_unlock
-            }
             inode_table[inumber].i_node_type = n_type;
             
             if (n_type == T_DIRECTORY) {
@@ -170,8 +174,8 @@ int inode_create(inode_type n_type) {
                     pthread_mutex_unlock(&freeinode_ts_mutex);
                     return -1;
                 }
-                // CRITICAL SECTION END freeinode_ts
-
+                if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+                    return -1; // DUVIDA I'm not sure I like it like this, because then the inode is not properly initialized...
                 // data_block_get devolve o endereço de 1 conjunto de bytes que vai até ao fim de fs_data (não está limitado ao tamanho de 1 bloco)
                 // no entanto, não excedemos a leitura para lá de 1 bloco porque MAX_DIR_ENTRIES dá o nº de dir_entries num bloco
                 // ao receber o void* e fazer o cast para dir_entry_t* podemos tratar esse conjunto de bytes como 1 ponteiro para 1 array de dir_entry_t
@@ -179,7 +183,8 @@ int inode_create(inode_type n_type) {
                     dir_entry[i].d_inumber = -1;
                 }
             } else {
-                // CRITICAL SECTION END freeinode_ts
+                if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+                    return -1; // DUVIDA same one, inode not properly initialized. Maybe use the ret_code trick?
                 /* In case of a new file, simply sets its size to 0 */
                 inode_table[inumber].i_size = 0;
                 inode_table[inumber].i_data_blocks[0] = -1;
@@ -191,9 +196,8 @@ int inode_create(inode_type n_type) {
             // CRITICAL SECTION END inode_table for writing
             return inumber;
         }
-        if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
-            return -1;
     }
+    pthread_mutex_unlock(&freeinode_ts_mutex);
     return -1;
 }
 
@@ -209,17 +213,21 @@ int inode_delete(int inumber) {
     // simulate storage access delay (to i-node and freeinode_ts)
     insert_delay();
     insert_delay();
-
-    // CRITICAL SECTION START freeinode_ts
+    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0)
+        return -1;
     if (!valid_inumber(inumber) || freeinode_ts[inumber] == FREE) {
-        // CRITICAL SECTION END freeinode_ts
+        pthread_mutex_unlock(&freeinode_ts_mutex);
         return -1;
     }
 
     freeinode_ts[inumber] = FREE; // possivelmente passar isto para o fim da função, tenho medo que com o paralelismo 
-                                  // eu liberte isto e depois ainda não limpei os data blocks e alguém escreve por cima: TODO 3
-    // CRITICAL SECTION END freeinode_ts
-    return inode_clear_file_contents(&inode_table[inumber]);
+                                  // eu liberte isto e depois ainda não limpei os data blocks e alguém escreve por cima: Update: desnecessário, ver Note
+    int ret_code = 0;
+    if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0) 
+        ret_code = -1; 
+    if (inode_clear_file_contents(&inode_table[inumber] != 0)
+        ret_code = -1;
+    return ret_code;
 }
 
 // Note there might be an off by one problem here: if file_offset is BLOCK_SIZE this will return 1, however block 1 will not be allocated if
@@ -432,7 +440,7 @@ ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t 
 
 ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset) {
     if (file_offset > inode->i_size) // this might happen if someone in another thread truncates the file between someone else calling this function and the start of its execution
-        return -1;                   // TODO for this to actually work properly, everytime we want to access a data block we need to make sure it exists. I believe that it might
+        return -1;                   // for this to actually work properly I once thought that everytime we want to access a data block we need to make sure it exists. I believe that it might
                                      // work like this, because of the lock of the inode when we call this function in operations.c and the checks on the original code (valid functions)
     size_t available_bytes = inode->i_size - file_offset;
     if (to_read > available_bytes)
@@ -486,6 +494,11 @@ ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_off
  * Input:
  *  - inumber: identifier of the i-node
  * Returns: pointer if successful, NULL if failed
+ * Note: as of right now inode_table's entries are not initialized in the beginning to a dummy value that indicates invalidness, nor
+ * properly signalled as destroyed with such a value  when inode_delete is called (this is because the original code did neither of these things). 
+ * As such there might be bugs wherein the inumber is valid but it was never initialized (so we will be accessing unitialized memory on the stack)
+ * or it was once initialized but now has the values that inode_delete left there. This is not very good defensive programming, I believe I should
+ * such a dummy value and if the value is the dummy return NULL
  */
 inode_t *inode_get(int inumber) {
     if (!valid_inumber(inumber)) {
@@ -589,6 +602,8 @@ int find_in_dir(int inumber, char const *sub_name) {
  * Returns: block index if successful, -1 otherwise
  */
 int data_block_alloc() {
+    if (pthread_mutex_lock(&free_blocks_mutex) != 0)
+        return -1;
     for (int i = 0; i < DATA_BLOCKS; i++) {
         if (i * (int) sizeof(allocation_state_t) % BLOCK_SIZE == 0) {
             insert_delay(); // simulate storage access delay to free_blocks
@@ -596,9 +611,14 @@ int data_block_alloc() {
 
         if (free_blocks[i] == FREE) {
             free_blocks[i] = TAKEN;
+            if (pthread_mutex_unlock(&free_blocks_mutex) !=0) {
+                free_blocks[i] = FREE; // this is just so that the block doesn't stay forever TAKEN, but I don't know if it makes sense DUVIDA
+                return -1;
+            }
             return i;
         }
     }
+    pthread_mutex_unlock(&free_blocks_mutex); // no check because we will return an error either way
     return -1;
 }
 
@@ -613,7 +633,11 @@ int data_block_free(int block_number) {
     }
 
     insert_delay(); // simulate storage access delay to free_blocks
+    if (pthread_mutex_lock(&free_blocks_mutex) != 0)
+        return -1;
     free_blocks[block_number] = FREE;
+    if (pthread_mutex_unlock(&free_blocks_mutex) != 0)
+        return -1;
     return 0;
 }
 
@@ -638,14 +662,21 @@ void *data_block_get(int block_number) {
  * Returns: file handle if successful, -1 otherwise
  */
 int add_to_open_file_table(int inumber, size_t offset) {
+    if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
+        return -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (free_open_file_entries[i] == FREE) {
             free_open_file_entries[i] = TAKEN;
+            if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0) {
+                free_open_file_entries[i] = TAKEN; // DUVIDA posso fazer isto para nao ficar sempre TAKEN
+                return -1;
+            }
             open_file_table[i].of_inumber = inumber;
             open_file_table[i].of_offset = offset;
             return i;
         }
     }
+    pthread_mutex_unlock(&free_open_file_entries_mutex);
     return -1;
 }
 
@@ -655,11 +686,16 @@ int add_to_open_file_table(int inumber, size_t offset) {
  * Returns 0 is success, -1 otherwise
  */
 int remove_from_open_file_table(int fhandle) {
+    if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
+        return -1;
     if (!valid_file_handle(fhandle) ||
         free_open_file_entries[fhandle] != TAKEN) {
+        pthread_mutex_unlock(&free_open_file_entries_mutex);
         return -1;
     }
     free_open_file_entries[fhandle] = FREE;
+    if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0)
+        return -1;
     return 0;
 }
 
@@ -667,6 +703,7 @@ int remove_from_open_file_table(int fhandle) {
  * Inputs:
  * 	 - file handle
  * Returns: pointer to the entry if sucessful, NULL otherwise
+ * Note: see inode_get's note, it also applies to this function
  */
 open_file_entry_t *get_open_file_entry(int fhandle) {
     if (!valid_file_handle(fhandle)) {
