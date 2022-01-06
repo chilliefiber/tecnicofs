@@ -202,6 +202,8 @@ int inode_create(inode_type n_type) {
  * Input:
  *  - inumber: i-node's number
  * Returns: 0 if successful, -1 if failed
+ * Note: when calling this function with a valid inumber, make sure it is protected by a write lock
+ * on inode_table[inumber], as it writes over the inode (in inode_clear_file_contents)
  */
 int inode_delete(int inumber) {
     // simulate storage access delay (to i-node and freeinode_ts)
@@ -378,7 +380,7 @@ static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **in
 ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset) {
     if (file_offset > inode->i_size) // in this case we are trying to make a "hole" in the file, writing past its end
         return -1;
-    if (file_offset + to_write > MAX_FILE_SIZE) 
+    if (file_offset + to_write > MAX_FILE_SIZE)  
         to_write = MAX_FILE_SIZE - file_offset;
     if (to_write == 0) 
        return 0;
@@ -431,7 +433,7 @@ ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t 
 ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset) {
     if (file_offset > inode->i_size) // this might happen if someone in another thread truncates the file between someone else calling this function and the start of its execution
         return -1;                   // TODO for this to actually work properly, everytime we want to access a data block we need to make sure it exists. I believe that it might
-                                     // work like this, because of all the checks in the original code's functions
+                                     // work like this, because of the lock of the inode when we call this function in operations.c and the checks on the original code (valid functions)
     size_t available_bytes = inode->i_size - file_offset;
     if (to_read > available_bytes)
         to_read = available_bytes;
@@ -521,7 +523,8 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
-    // CRITICAL SECTION END read inode_table 
+    // CRITICAL SECTION END read inode_table, if we are protecting data blocks (which we aren't)
+    // so the end is really at the end of the function, where we end the dependency on the data block
     if (dir_entry == NULL) {
         return -1;
     }
@@ -547,7 +550,13 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
  */
 int find_in_dir(int inumber, char const *sub_name) { 
     insert_delay(); // simulate storage access delay to i-node with inumber
-    // CRITICAL SECTION START read inode_table
+    // CRITICAL SECTION START read inode_table 
+    // this function is not part of the public API and it is only called
+    // in operations.c inside tfs_lookup, where it is always protected by the mutex of the 
+    // root file placed in tfs_write. As such the whole function is covered by a mutex
+    // the critical sections are still highlighted, because maybe (in the exam perhaps)
+    // this might have to change, with multiple directories for example, and then this
+    // function won't be MT safe
     if (!valid_inumber(inumber) ||
         inode_table[inumber].i_node_type != T_DIRECTORY) {
         // CRITICAL SECTION END inode_table
@@ -557,7 +566,9 @@ int find_in_dir(int inumber, char const *sub_name) {
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
-    // CRITICAL SECTION END inode_table
+    // CRITICAL SECTION END inode_table this is wrong! it is only 
+    // the end of the critical section if we protect the data block: since we don't
+    // the critical section ends when we stop using the data block's data
     if (dir_entry == NULL) {
         return -1;
     }
