@@ -54,14 +54,14 @@ int main() {
 
     pthread_t th[THREAD_COUNT];
     int pthread_ret_value;
-    for (i = 0; i < THREAD_COUNT; i++) {
+    for (int i = 0; i < THREAD_COUNT; i++) {
         if ((pthread_ret_value = pthread_create(&th[i], NULL, &read_and_assert, NULL)) != 0) {
             fprintf(stderr, "Error creating thread: %s\n", strerror(pthread_ret_value)); 
             return -1;
         }
     }
 
-    for (i = 0; i < THREAD_COUNT; i++) {
+    for (int i = 0; i < THREAD_COUNT; i++) {
         if ((pthread_ret_value = pthread_join(th[i], NULL)) != 0) {
             fprintf(stderr, "Error joining thread: %s\n", strerror(pthread_ret_value)); 
             return -1;

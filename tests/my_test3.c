@@ -3,8 +3,8 @@
 #include <string.h>
 #include <pthread.h>
 #define COUNT 1000 
-#define SIZE 250
-#define THREAD_COUNT 11
+#define SIZE 125
+#define THREAD_COUNT 20
 
 /**
    This test fills in a new file via multiple writes, 
@@ -37,8 +37,13 @@ void *read_and_close(void *arg) {
     int *fd = (int *) arg;
     assert(fd != NULL);
     char output [SIZE];
-    for (int i = 0; i < COUNT; i++) {
-        assert(tfs_read(*fd, output, SIZE) == SIZE);
+    ssize_t read = 0, total_read = 0;
+    for (int i = 0; i < COUNT * 2; i++) {
+        read = tfs_read(*fd, output, SIZE);
+        printf("read is %ld\n", read);
+        total_read += read;
+        printf("total_read is %ld\n", total_read);
+        assert(read == SIZE);
         assert (memcmp(input, output, SIZE) == 0);
     }
     assert(tfs_close(*fd) != -1);
@@ -49,8 +54,18 @@ void *write_and_assert() {
     /* Write input COUNT times into a new file */
     int fd = tfs_open(path, TFS_O_APPEND);
     assert(fd != -1);
-    for (int i = 0; i < COUNT; i++) {
-        assert(tfs_write(fd, input, SIZE) == SIZE);
+    ssize_t written = SIZE * COUNT;
+    int count = 0;
+    ssize_t ret = 0;
+    for (int k = 0; k < COUNT; k++) {
+        printf("1- k is %d\n", k);
+        ret = tfs_write(fd, input, SIZE);
+        count++;
+        printf("ret is %ld\n", ret); 
+        written += ret;
+        printf("written is %ld\n", written);
+        printf("2- k is %d\n", k);
+        assert(ret == SIZE);
     }
     assert(tfs_close(fd) != -1);
     return NULL;
@@ -70,22 +85,23 @@ int main() {
     /* Write input COUNT times into a new file */
     int fd = tfs_open(path, TFS_O_CREAT);
     assert(fd != -1);
-    for (int i = 0; i < COUNT; i++) {
+    int i;
+    for (i = 0; i < COUNT; i++) {
         assert(tfs_write(fd, input, SIZE) == SIZE);
     }
     assert(tfs_close(fd) != -1);
 
     pthread_t th[THREAD_COUNT];
     int pthread_ret_value;
-    for (i = 0; i < THREAD_COUNT; i++) {
+    for (i = 0; i < THREAD_COUNT - 1; i++) {
         if (i < THREAD_COUNT - 1 && (pthread_ret_value = pthread_create(&th[i], NULL, &read_and_open, (void*) &fds[i])) != 0) {
                 fprintf(stderr, "Error creating thread: %s\n", strerror(pthread_ret_value)); 
                 return -1;
         }
-        else if ((pthread_ret_value = pthread_create(&th[i], NULL, &write_and_assert, NULL)) != 0) {
-            fprintf(stderr, "Error creating thread: %s\n", strerror(pthread_ret_value)); 
-            return -1;
-        }
+    }
+    if ((pthread_ret_value = pthread_create(&th[THREAD_COUNT - 1], NULL, &write_and_assert, NULL)) != 0) {
+        fprintf(stderr, "Error creating thread: %s\n", strerror(pthread_ret_value)); 
+        return -1;
     }
 
     for (i = 0; i < THREAD_COUNT; i++) {

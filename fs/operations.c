@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 pthread_mutex_t root_dir_mutex;
 pthread_mutex_t file_entry_mutex[MAX_OPEN_FILES];
@@ -35,7 +36,7 @@ int tfs_destroy() {
     if (pthread_mutex_destroy(&root_dir_mutex) != 0)
         return -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) 
-        if (pthread_mutex_init(&file_entry_mutex[i]) != 0)
+        if (pthread_mutex_destroy(&file_entry_mutex[i]) != 0)
             return -1;
     for (int j = 0; j < INODE_TABLE_SIZE; j++) {
         if (pthread_rwlock_destroy(&inode_rwlock[j]) != 0) 
@@ -170,7 +171,7 @@ ssize_t tfs_write(int fhandle, void const *buffer, size_t to_write) {
     /* From the open file table entry, we get the inode */
     inode_t *inode = inode_get(file->of_inumber);
     if (inode == NULL) {
-        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber];
+        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
         pthread_mutex_unlock(&file_entry_mutex[fhandle]);
         return -1;
     }
@@ -213,14 +214,14 @@ ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
     }
 
     // here I am trusting that the open file entry stores a valid inumber 
-    if (pthread_rwlock_rlock(&inode_rwlock[file->of_inumber]) != 0) {
+    if (pthread_rwlock_rdlock(&inode_rwlock[file->of_inumber]) != 0) {
         pthread_mutex_unlock(&file_entry_mutex[fhandle]);
         return -1;
     }
     /* From the open file table entry, we get the inode */
     inode_t *inode = inode_get(file->of_inumber);
     if (inode == NULL) {
-        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber];
+        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
         pthread_mutex_unlock(&file_entry_mutex[fhandle]);
         return -1;
     }
@@ -279,7 +280,7 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
         return -1;
     }
 
-    if (pthread_rwlock_rlock(&inode_rwlock[source_file->of_inumber]) != 0) {
+    if (pthread_rwlock_rdlock(&inode_rwlock[source_file->of_inumber]) != 0) {
         tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
         pthread_mutex_unlock(&file_entry_mutex[fhandle]);
         return -1;
@@ -293,7 +294,7 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
         return -1;
     }
 
-    source_file->offset = 0; // DEFENSIVE prevent weird bug mentioned above when we lock the mutex
+    source_file->of_offset = 0; // DEFENSIVE prevent weird bug mentioned above when we lock the mutex
     
     // now everything related to the source file has been retrieved, we can create the destination file
 

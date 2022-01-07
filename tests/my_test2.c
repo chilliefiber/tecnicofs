@@ -43,13 +43,14 @@ int main() {
     /* Write input COUNT times into a new file */
     fd = tfs_open(path, TFS_O_CREAT);
     assert(fd != -1);
-    for (int i = 0; i < COUNT; i++) {
+    int i;
+    for (i = 0; i < COUNT; i++) {
         assert(tfs_write(fd, input, SIZE) == SIZE);
     }
     assert(tfs_close(fd) != -1);
 
     /* Open again to check if contents are as expected */
-    int fd = tfs_open(path, 0);
+    fd = tfs_open(path, 0);
     assert(fd != -1 );
     pthread_t th[THREAD_COUNT];
     int pthread_ret_value;

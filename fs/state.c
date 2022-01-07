@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include <pthread.h>
 
 
 /* Persistent FS state  (in reality, it should be maintained in secondary
@@ -79,7 +79,7 @@ static void insert_delay() {
 int state_init() {
     pthread_mutex_init(&freeinode_ts_mutex, NULL); // this function always returns 0
     pthread_mutex_init(&free_blocks_mutex, NULL);
-    pthread_mutex_init(&free_open_file_entries, NULL);
+    pthread_mutex_init(&free_open_file_entries_mutex, NULL);
     
 
     // Note: in this function, which is only supposed to be called once, I lock the whole iteration  
@@ -225,7 +225,7 @@ int inode_delete(int inumber) {
     int ret_code = 0;
     if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0) 
         ret_code = -1; 
-    if (inode_clear_file_contents(&inode_table[inumber] != 0)
+    if (inode_clear_file_contents(&inode_table[inumber]) != 0)
         ret_code = -1;
     return ret_code;
 }

@@ -1,10 +1,6 @@
-1- fazer a tfs_copy_to_external. Notar que quando estou a fazer tfs_close não há dependencia da open_file_entry, posso destrancar antes
+1- Corrigir erro no teste 3, aumentar threads nos outros
+1-  Notar que quando estou a fazer tfs_close não há dependencia da open_file_entry
 1- passar a valid inumber e valid file handle para nao serem static, e assim poder utilizar no operations. Antes de fazer lock aos trincos, verificar se os indices sao validos
-1- colocar os trincos das tabelas de alocação no state.c
-2- inicializar os trincos dos 2 ficheiros 
-1- apagar todos os mutex cenas relativos à inode_table no state.c: vou trancar isso com rwlock no operations.c
-2- terminar no state.c os mutexes das tabelas FREE/TAKEN
-3- colocar os rwlocks no open_file_entries e no inode_table no operations.c
 4- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
 5- adicionar à estrutura do open_file_entry um indicador de se o modo é append. Nesse caso quando fazemos uma leitura/escrita
 o offset deve ser sempre colocado igual a inode->i_size (de preferencia no operations.c)
