@@ -17,7 +17,8 @@
 
 
 char *path = "/f1";
-char input[SIZE]; 
+char input[SIZE];
+char input2[SIZE]; 
 int fds[THREAD_COUNT - 1];
 
 void *read_and_open(void *arg) {
@@ -38,13 +39,13 @@ void *read_and_close(void *arg) {
     assert(fd != NULL);
     char output [SIZE];
     ssize_t read = 0, total_read = 0;
-    for (int i = 0; i < COUNT * 2; i++) {
+    for (int i = 0; i < COUNT; i++) {
         read = tfs_read(*fd, output, SIZE);
-        printf("read is %ld\n", read);
+    //    printf("read is %ld\n", read);
         total_read += read;
-        printf("total_read is %ld\n", total_read);
+      //  printf("total_read is %ld\n", total_read);
         assert(read == SIZE);
-        assert (memcmp(input, output, SIZE) == 0);
+        assert (memcmp(input2, output, SIZE) == 0);
     }
     assert(tfs_close(*fd) != -1);
     return NULL;
@@ -55,16 +56,16 @@ void *write_and_assert() {
     int fd = tfs_open(path, TFS_O_APPEND);
     assert(fd != -1);
     ssize_t written = SIZE * COUNT;
-    int count = 0;
+    //int count = 0;
     ssize_t ret = 0;
     for (int k = 0; k < COUNT; k++) {
-        printf("1- k is %d\n", k);
-        ret = tfs_write(fd, input, SIZE);
-        count++;
-        printf("ret is %ld\n", ret); 
+//        printf("1- k is %d\n", k);
+        ret = tfs_write(fd, input2, SIZE);
+    //    count++;
+  //      printf("ret is %ld\n", ret); 
         written += ret;
-        printf("written is %ld\n", written);
-        printf("2- k is %d\n", k);
+      //  printf("written is %ld\n", written);
+       // printf("2- k is %d\n", k);
         assert(ret == SIZE);
     }
     assert(tfs_close(fd) != -1);
@@ -79,6 +80,7 @@ int main() {
     */
     memset(input, 'A', SIZE);
 
+    memset(input2, 'B', SIZE);
 
     assert(tfs_init() != -1);
 
@@ -90,7 +92,7 @@ int main() {
         assert(tfs_write(fd, input, SIZE) == SIZE);
     }
     assert(tfs_close(fd) != -1);
-
+    
     pthread_t th[THREAD_COUNT];
     int pthread_ret_value;
     for (i = 0; i < THREAD_COUNT - 1; i++) {

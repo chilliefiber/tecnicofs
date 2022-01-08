@@ -5,7 +5,7 @@
 
 #define COUNT 1000 
 #define SIZE 250
-#define THREAD_COUNT 10
+#define THREAD_COUNT 50
 
 /**
    This test fills in a new file via multiple writes, 
