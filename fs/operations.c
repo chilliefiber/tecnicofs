@@ -5,18 +5,13 @@
 #include <string.h>
 #include <pthread.h>
 
-pthread_mutex_t root_dir_mutex;
+pthread_mutex_t root_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t file_entry_mutex[MAX_OPEN_FILES];
-pthread_rwlock_t inode_rwlock[INODE_TABLE_SIZE];
 int tfs_init() {
     if (state_init() != 0)
         return -1;
-    pthread_mutex_init(&root_dir_mutex, NULL); 
     for (int i = 0; i < MAX_OPEN_FILES; i++) 
         pthread_mutex_init(&file_entry_mutex[i], NULL);
-    for (int j = 0; j < INODE_TABLE_SIZE; j++) {
-        if (pthread_rwlock_init(&inode_rwlock[j], NULL) != 0) // this function actually returns non zero values, unlike its mutex counterpart
-            return -1;
     }
     /* create root inode */
     // POSSIBLE CRITICAL SECTION start inode_table, inside inode_create
@@ -32,16 +27,10 @@ int tfs_init() {
 }
 
 int tfs_destroy() { 
-     
-    if (pthread_mutex_destroy(&root_dir_mutex) != 0)
-        return -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) 
         if (pthread_mutex_destroy(&file_entry_mutex[i]) != 0)
             return -1;
-    for (int j = 0; j < INODE_TABLE_SIZE; j++) {
-        if (pthread_rwlock_destroy(&inode_rwlock[j]) != 0) 
-            return -1;
-    }
+    
     return state_destroy();
 }
 
@@ -64,7 +53,7 @@ int tfs_lookup(char const *name) {
 int tfs_open(char const *name, int flags) {
     int inum;
     size_t offset;
-
+    bool append = false;
     /* Checks if the path name is valid */
     if (!valid_pathname(name)) { // note that thanks to this check it is impossible to open the root directory. 
         return -1;
@@ -101,6 +90,7 @@ int tfs_open(char const *name, int flags) {
         /* Determine initial offset */
         if (flags & TFS_O_APPEND) {
             offset = inode->i_size;
+            append = true;
         } else {
             offset = 0;
         }
@@ -133,7 +123,7 @@ int tfs_open(char const *name, int flags) {
 
     /* Finally, add entry to the open file table and
      * return the corresponding handle */
-    return add_to_open_file_table(inum, offset);
+    return add_to_open_file_table(inum, offset, append);
 
     /* Note: for simplification, if file was created with TFS_O_CREAT and there
      * is an error adding an entry to the open file table, the file is not
@@ -145,66 +135,11 @@ int tfs_open(char const *name, int flags) {
 int tfs_close(int fhandle) { return remove_from_open_file_table(fhandle); }
 
 ssize_t tfs_write(int fhandle, void const *buffer, size_t to_write) {
-    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
-        return -1;
-    open_file_entry_t *file = get_open_file_entry(fhandle);
-    if (file == NULL) {
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
-
-    /* Determine how many bytes to write */
-    if (to_write + file->of_offset > MAX_FILE_SIZE) { 
-        to_write = MAX_FILE_SIZE - file->of_offset;
-        if (to_write == 0) { // we return here immediately to unlock the mutex faster and to not lock the rwlock of the inode
-            if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
-                return -1;
-            return 0;
-        }
-    }
-   
-    // here I am trusting that the open file entry stores a valid inumber 
-    if (pthread_rwlock_wrlock(&inode_rwlock[file->of_inumber]) != 0) {
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
-    /* From the open file table entry, we get the inode */
-    inode_t *inode = inode_get(file->of_inumber);
-    if (inode == NULL) {
-        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
-
-
-    ssize_t written = inode_write(inode, buffer, to_write, file->of_offset);
-
-    char error = 0;
-    if (pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]) != 0) // unlock it here because it is no longer needed
-        error = 1; // we don't immediately return an error value because I want to have a chance to update the offset 
-
-    // right now written has the number of bytes written, or -1 if there was an error in inode_write
-    if (written > 0) {
-        /* The offset associated with the file handle is
-         * incremented accordingly */
-        file->of_offset += (size_t) written; // TODO 3: note that this might cause problems because the offset is only updated in the end, 
-                                     // and if there are multiple clients accessing this there might be a race condition where
-                                     // the real offset was changed, but file->of_offset wasn't yet updated. It might be wise
-                                     // to alter it everytime we write to make it thread-safe. Talvez isto não faça assim tanto sentido
-                                     // porque cada acesso multi-threaded vai ter um open file diferente para o mesmo ficheiro??
-                                     // TODO dúvida: então escrevemos sempre no fim do ficheiro? R: falso, escrevemos sempre onde aponta o offset
-                                     // deste open file, que pode não ser o fim do ficheiro penso eu
-                                     // NOTE: there is a chance that file->of_offset == MAX_FILE_SIZE, this is ok it means that the file is full
-    }
-
-    if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0 || error)
-        return -1;    
-        
-    return written; 
+    return inode_write(fhandle, buffer, to_write);
 }
 
-
 ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
+    
     if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
         return -1;
     open_file_entry_t *file = get_open_file_entry(fhandle);

@@ -29,9 +29,10 @@ static open_file_entry_t open_file_table[MAX_OPEN_FILES]; // aqui o indice corre
 static char free_open_file_entries[MAX_OPEN_FILES]; // indice igual ao de cima para a mesma entrada
 
 /* Mutexes for allocation tables */
-pthread_mutex_t freeinode_ts_mutex;
-pthread_mutex_t free_blocks_mutex;
-pthread_mutex_t free_open_file_entries_mutex;
+pthread_mutex_t freeinode_ts_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t free_blocks_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t free_open_file_entries_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_rwlock_t inode_rwlock[INODE_TABLE_SIZE] = {PTHREAD_RWLOCK_INITIALIZER};
 
 static inline bool valid_inumber(int inumber) {
     return inumber >= 0 && inumber < INODE_TABLE_SIZE;
@@ -110,13 +111,7 @@ int state_init() {
     return 0;
 }
 
-int state_destroy() { /* destroys mutexes. will return an error if they are busy */
-    if (pthread_mutex_destroy(&freeinode_ts_mutex) != 0) 
-        return -1;
-    if (pthread_mutex_destroy(&free_blocks_mutex) != 0)
-        return -1;
-    if (pthread_mutex_destroy(&free_open_file_entries_mutex) != 0)
-        return -1;
+int state_destroy() { 
     return 0;
 }
 
@@ -137,13 +132,6 @@ int inode_create(inode_type n_type) {
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
         if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) {
             insert_delay(); // simulate storage access delay (to freeinode_ts)
-            // penso que este delay seja para simular que vamos buscar
-            // à memória secundária 1 bloco referente à freeinode_ts
-            // de cada vez. se (inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0
-            // então é o início de 1 novo bloco (que depois fica guardado em cache)
-            // o que não entendo é, tendo em conta que freeinode_ts é 1 array do tipo char,
-            // porque é que usamos sizeof(allocation_state_t). eu pensava que os valores
-            // FREE/TAKEN seriam auto convertidos para char ao fazer freeinode_ts[inumber] = FREE/TAKEN
         }
         /* Finds first free entry in i-node table */
         if (freeinode_ts[inumber] == FREE) {
@@ -383,20 +371,43 @@ static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **in
     return block_number;
 }
 
-// o openfile->of_offset não será atualizado nesta função, ela
-// vai lidar apenas com a escrita no inode. Idem aspas para inode_read
+// Should be renamed to fd_write now
 ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset) {
-    if (file_offset > inode->i_size) // in this case we are trying to make a "hole" in the file, writing past its end
+    open_file_entry_t *file = get_open_file_entry(fhandle);
+    if (file == NULL) // POSSIBLE CRITICAL
         return -1;
-    if (file_offset + to_write > MAX_FILE_SIZE)  
-        to_write = MAX_FILE_SIZE - file_offset;
-    if (to_write == 0) 
-       return 0;
+    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
+        return -1;
 
+    inode_t *inode = inode_get(file->of_inumber);
+    if (inode == NULL) { // POSSIBLE CRITICAL
+        pthread_mutex_unlock(&file_entry_mutex[fhandle]); // no need to check for error values
+        return -1;
+    }
+    if (pthread_rwlock_wrlock(&inode_rwlock[file->of_inumber]) != 0) {
+        pthread_mutex_unlock(&file_entry_mutex[fhandle]); // no need to check for error values
+        return -1;
+    }
+    if (file->of_offset > inode->i_size) {// in this case we are trying to make a "hole" in the file, writing past its end
+        pthread_rwlock_wrlock(&inode_rwlock[file->of_inumber]);
+        pthread_mutex_unlock(&file_entry_mutex[fhandle]); // no need to check for error values
+        return -1;
+    if (file->of_append)
+        file->of_offset = inode->i_size;
+    if (file->of_offset + to_write > MAX_FILE_SIZE)  
+        to_write = MAX_FILE_SIZE - file_offset;
     ssize_t bytes_written = 0;
-    int first_block_ix = calculate_block_index(file_offset); 
-    int last_block_ix = calculate_block_index(file_offset + to_write);
-    size_t block_offset = calculate_block_offset(file_offset); // offset in the block we are currently reading from, which right now is first_block
+    if (to_write == 0) {
+        if (pthread_rwlock_wrlock(&inode_rwlock[file->of_inumber]) != 0)
+            bytes_written = -1;
+        if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
+            bytes_written = -1;
+        return bytes_written;
+    }
+
+    int first_block_ix = calculate_block_index(file->of_offset); 
+    int last_block_ix = calculate_block_index(file->of_offset + to_write);
+    size_t block_offset = calculate_block_offset(file->of_offset); // offset in the block we are currently reading from, which right now is first_block
     int block_number = -1;
     void *block = NULL;
     int *indirect_block_data = NULL;
@@ -424,12 +435,12 @@ ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t 
         /* Perform the actual write */
         memcpy(block + block_offset, buffer, to_write_in_block);
         bytes_written += (ssize_t) to_write_in_block;
-        file_offset += to_write_in_block;
+        file->of_offset += to_write_in_block;
         buffer += to_write_in_block;
         to_write -= to_write_in_block;
         block_offset = 0; // offset is possibly not 0 in the first iteration, but in the other ones it's definitely 0
-        if (file_offset > inode->i_size)
-            inode->i_size = file_offset;
+        if (file->of_offset > inode->i_size)
+            inode->i_size = file->of_offset;
     }
     
     if (bytes_written == 0) // if bytes_written is 0 at this point there was an error before we could write anything
@@ -659,9 +670,10 @@ void *data_block_get(int block_number) {
  * Inputs:
  * 	- I-node number of the file to open
  * 	- Initial offset
+ *      - Boolean value indicating if the file was opened in append mode
  * Returns: file handle if successful, -1 otherwise
  */
-int add_to_open_file_table(int inumber, size_t offset) {
+int add_to_open_file_table(int inumber, size_t offset, bool append) {
     if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
         return -1;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
@@ -673,6 +685,7 @@ int add_to_open_file_table(int inumber, size_t offset) {
             }
             open_file_table[i].of_inumber = inumber;
             open_file_table[i].of_offset = offset;
+            open_file_table[i].of_append = append;
             return i;
         }
     }
