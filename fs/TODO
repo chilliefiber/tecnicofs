@@ -1,8 +1,7 @@
 1- Isto tá a meio de 1 refatorização: a fd_read/fd_write/fd_copy parecem me bem mas devem ser revistas. Mais importante é rever a tfs_open
-1- Fazer a fd_read e file_copy_to_external. Na copy_to_external usar ou mmap e memcpy ou uma buffer auxiliar e vários reads
+2- Analisar bem todos os uso do diretório raiz
 1-  Notar que quando estou a fazer tfs_close não há dependencia da open_file_entry
 1- passar a valid inumber e valid file handle para nao serem static, e assim poder utilizar no operations. Antes de fazer lock aos trincos, verificar se os indices sao validos
+(valida apenas se os trincos estiverem no operations)
 4- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
-5- adicionar à estrutura do open_file_entry um indicador de se o modo é append. Nesse caso quando fazemos uma leitura/escrita
-o offset deve ser sempre colocado igual a inode->i_size (de preferencia no operations.c)
-6- os trincos que coloquei no state.c foram lá colocados para limitar ao máximo as secções críticas. Fica mal?
+

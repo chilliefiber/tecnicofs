@@ -119,150 +119,110 @@ int tfs_open(char const *name, int flags) {
 int tfs_close(int fhandle) { return remove_from_open_file_table(fhandle); }
 
 ssize_t tfs_write(int fhandle, void const *buffer, size_t to_write) {
-    return fd_write(fhandle, buffer, to_write);
+    open_file_entry_t *file = get_open_file_entry(fhandle);
+    if (file == NULL) // POSSIBLE CRITICAL
+        return -1;
+    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
+        return -1;
+
+    inode_t *inode = inode_get(file->of_inumber);
+    if (inode == NULL) { // POSSIBLE CRITICAL
+        pthread_mutex_unlock(&file_entry_mutex[fhandle]); // no need to check for error values
+        return -1;
+    }
+    ssize_t ret_value = inode_write(file, buffer, to_write); 
+    pthread_mutex_unlock(&file_entry_mutex[fhandle]); // 
+    return ret_value;
 }
 
 ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
-     
     open_file_entry_t *file = get_open_file_entry(fhandle);
-    if (file == NULL) {
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
+    if (file == NULL)  // POSSIBLE CRITICAL
         return -1;
-    }
-
-    // here I am trusting that the open file entry stores a valid inumber 
-    /* From the open file table entry, we get the inode */
-    inode_t *inode = inode_get(file->of_inumber);
-    if (inode == NULL) {
-        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
-
-    char error = 0;
-    /* Determine how many bytes to read */
-    size_t to_read = inode->i_size - file->of_offset; // right now to_read saves the amount of bytes we CAN read from the file, starting at offset and ending in the last byte
-    if (to_read > len) {
-        to_read = len; // making sure that we don't try to write outside the buffer
-    }
-    if (to_read == 0) {    
-        if (pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]) != 0)
-            error = 1;
-        if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
-            error = 1;
-        return error ? -1 : 0; 
-    }
     
-    // COPIED TO HERE
-    ssize_t read = inode_read(inode, buffer, to_read, file->of_offset);
+    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
+        return -1;
 
-    if (pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]) != 0) 
-        error = 1; 
+    inode_read();
 
-    if (read > 0) {
-        /* The offset associated with the file handle is
-         * incremented accordingly */
-        file->of_offset += (size_t) read;
-    }
-
-    if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
-        error = 1;
-    return error ? -1 : read;
+    pthread_mutex_unlock(&file_entry_mutex[fhandle]); // should I check?
+    
+    return (ssize_t) bytes_read; 
 }
 
-// TODO creating an array the size of the file is very crude, possibly define MAX_READ and make multiple reads
 
 // I didn't use tfs_read because to know the length of the file I needed the inode, and that implies one access
 // to memory. In reality the inode would probably be cached, but here if I got the length and then called tfs_read 
-// there would be 2 accesses to memory to get the same inode
+// there would be 2 accesses to memory to get the same inode. More importantly, it would create a data race because
+// if we called inode_get_size here and then tfs_read the size of the file could change between the accesses to the inode
 int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
     int fhandle = tfs_open(source_path, 0); // flags == 0 means open for reading at beginning 
     if (fhandle == -1)
         return -1;
-    int error_code = fd_copy(fhandle, dest_path);
+    open_file_entry_t *source_file = get_open_file_entry(fhandle);
+    if (source_file == NULL)
+        return -1;
+    
     // the mutex here will only be rarely, if ever needed. this is because we just returned this fhandle from
     // tfs_open and as such no one else has this information (the handle). However, we keep it here to prevent
     // cases where some other thread had this same fhandle related to a previous use of the same index (sort of but not really like the ABA problem)
-    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0) {
-        tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
+    if (pthread_mutex_lock(&(source_file->of_mutex)) != 0) // MAYBE REMOVE IF WE CAN ASSUME option as per Daniel's email:
         return -1;
-    }
-
-    if (pthread_rwlock_rdlock(&inode_rwlock[source_file->of_inumber]) != 0) {
-        tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
+    
     inode_t *inode = inode_get(source_file->of_inumber);
 
     if (inode == NULL) {
-        pthread_rwlock_unlock(&inode_rwlock[source_file->of_inumber]);
-        tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
+        pthread_mutex_unlock(&source_file->of_mutex);
         return -1;
     }
-
-    source_file->of_offset = 0; // DEFENSIVE prevent weird bug mentioned above when we lock the mutex
-    
-    // now everything related to the source file has been retrieved, we can create the destination file
-
+    // now we know there is an inode for this source file, so we can create the new file in the external fs
     FILE *dest_file = fopen(dest_path, "w");
     if (!dest_file) {
-        pthread_rwlock_unlock(&inode_rwlock[source_file->of_inumber]);
-        tfs_close(fhandle); // not checking the error because we will return an error either way
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
+        pthread_mutex_unlock(&source_file);
         return -1; // TODO possibly perror
     }
 
-    int ret_code = 0; 
-    // if the file was empty
+    int ret_code = inode_dump(inode, dest_file);
+
+    if (pthread_rwlock_rdlock(&inode_rwlock[source_file->of_inumber]) != 0) {
+        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
+        fclose(dest_file);
+        return -1;
+    }
+    int error_code = 0;
     if (inode->i_size == 0) {
         if (pthread_rwlock_unlock(&inode_rwlock[source_file->of_inumber]) != 0)
-            ret_code = -1;
-        if (tfs_close(fhandle) == -1)
-            ret_code = -1;
+            error_code = -1;
         if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
-            ret_code = -1;
+            error_code = -1;
         if (fclose(dest_file) == EOF)
-            ret_code = -1;
-        return ret_code;
+            error_code = -1;
+        return error_code;
     }
-
-    char file_contents[inode->i_size];
-
-    size_t to_read = inode->i_size, dest_offset = 0;
-
-    ssize_t read = 0;
-   
-    while ((read = inode_read(inode, file_contents + dest_offset, to_read, source_file->of_offset)) >= 0) {
-        to_read -= (size_t) read;
-        if (to_read == 0)
+    char buffer[BUFFER_SIZE];
+    
+    size_t bytes_left = inode->i_size, to_read, bytes_read;
+    while (bytes_left > 0) {
+        to_read = bytes_left > BUFFER_SIZE ? BUFFER_SIZE : bytes_left;
+        bytes_read = inode_read(inode, source_file, to_read, buffer);
+        if (bytes_read == 0)
             break;
-        dest_offset += (size_t) read;
-        source_file->of_offset += (size_t) read;
+        if (fwrite(buffer, 1, bytes_read, dest_file) < bytes_read)
+            break;
+        bytes_left -= bytes_read;
     }
-  
-    size_t inode_size = inode->i_size; // this is just so we can unlock the inode earlier
+   
     if (pthread_rwlock_unlock(&inode_rwlock[source_file->of_inumber]) != 0)
-        ret_code = -1;
-    if (tfs_close(fhandle) == -1) 
-        ret_code = -1;
+        error_code = -1;
     if (pthread_mutex_unlock(&file_entry_mutex[fhandle]) != 0)
-        ret_code = -1;
-
-    // if we read some bytes, we will write them, even if it's not the whole file. TODO ask if this is appropriate behaviour
-    if (to_read < inode_size) 
-        // inode->i_size - to_read is the number of bytes actually written, 1 is sizeof(char)
-        // if it didn't write exactly inode->i_size bytes, even if to_read wasn't 0 we would have set ret_code to -1 later on because there are still bytes to be read so we do it immediately here
-        if (fwrite(file_contents, 1, inode_size - to_read, dest_file) < inode_size)
-            ret_code = -1;
-
+        error_code = -1;
     if (fclose(dest_file) == EOF)
-        ret_code = -1;
-    if (to_read != 0) // there were still bytes to be read
-        ret_code = -1;
-
-    // NEW
-    tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
+        error_code = -1;
+    if (bytes_left != 0)
+        error_code = -1;
+    return error_code; 
+    int ret_code = fd_copy(fhandle, dest_path);
+    if (tfs_close(fhandle) == -1) 
+        ret_code = -1; 
     return ret_code; 
 }

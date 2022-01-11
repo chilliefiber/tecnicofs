@@ -26,6 +26,7 @@ typedef struct {
     size_t i_size;
     int i_data_blocks[INODE_DIRECT_REFERENCES];
     int i_indirect_data_block; // referência para 1 bloco indireto
+    pthread_rwlock_t i_rwlock;
     /* in a real FS, more fields would exist here */
 } inode_t;
 
@@ -38,6 +39,7 @@ typedef struct {
     int of_inumber;
     size_t of_offset;
     bool of_append;     
+    pthread_mutex_t of_mutex;
 } open_file_entry_t;
 
 #define MAX_DIR_ENTRIES (BLOCK_SIZE / sizeof(dir_entry_t)) // só existe 1 diretório, o root. Esse diretório só tem 1 bloco.
