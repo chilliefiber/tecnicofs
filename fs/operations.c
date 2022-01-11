@@ -6,13 +6,9 @@
 #include <pthread.h>
 
 pthread_mutex_t root_dir_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t file_entry_mutex[MAX_OPEN_FILES];
 int tfs_init() {
     if (state_init() != 0)
         return -1;
-    for (int i = 0; i < MAX_OPEN_FILES; i++) 
-        pthread_mutex_init(&file_entry_mutex[i], NULL);
-    }
     /* create root inode */
     // POSSIBLE CRITICAL SECTION start inode_table, inside inode_create
     int root = inode_create(T_DIRECTORY);
@@ -38,7 +34,6 @@ static bool valid_pathname(char const *name) {
     return name != NULL && strlen(name) > 1 && name[0] == '/';
 }
 
-
 int tfs_lookup(char const *name) {
     if (!valid_pathname(name)) {
         return -1;
@@ -60,7 +55,8 @@ int tfs_open(char const *name, int flags) {
     }
 
     // to prevent the creation of 2 files with the same name we lock
-    // the root directory here
+    // the root directory here. This way the first to lock will create the
+    // file, and the second one will receive the inum in tfs_lookup
     if (pthread_mutex_lock(&root_dir_mutex) != 0)
         return -1;
     inum = tfs_lookup(name);
@@ -68,35 +64,23 @@ int tfs_open(char const *name, int flags) {
         /* The file already exists */
         if (pthread_mutex_unlock(&root_dir_mutex) != 0)
             return -1;
-        // CRITICAL SECTION start write (because of truncate) inode_table[inum]
-        // here we trust tfs_lookup to send a valid inumber (since it is bigger than -1)
-        if (pthread_rwlock_wrlock(&inode_rwlock[inum]) != 0) {
-            return -1; 
-        }
+
         inode_t *inode = inode_get(inum);
-        if (inode == NULL) {
-            pthread_rwlock_unlock(&inode_rwlock[inum]);
+        if (inode == NULL) { // POSSIBLE CRITICAL
             return -1;
-        }
 
         /* Trucate (if requested) */
         if (flags & TFS_O_TRUNC) {
-            if (inode_clear_file_contents(inode) == -1) {
-                pthread_rwlock_unlock(&inode_rwlock[inum]);
-                // CRITICAL SECTION end inode_table[inum]
+            if (inode_clear_file_contents(inode, inum) == -1) 
                 return -1;
-            }
         }
         /* Determine initial offset */
         if (flags & TFS_O_APPEND) {
-            offset = inode->i_size;
+            offset = inode_get_size(inode, inum);
             append = true;
         } else {
             offset = 0;
         }
-        if (pthread_rwlock_unlock(&inode_rwlock[inum]) != 0) 
-            return -1; 
-        // CRITICAL SECTION end inode_table[inum]
     } else if (flags & TFS_O_CREAT) {
         /* The file doesn't exist; the flags specify that it should be created*/
         /* Create inode */
@@ -135,13 +119,11 @@ int tfs_open(char const *name, int flags) {
 int tfs_close(int fhandle) { return remove_from_open_file_table(fhandle); }
 
 ssize_t tfs_write(int fhandle, void const *buffer, size_t to_write) {
-    return inode_write(fhandle, buffer, to_write);
+    return fd_write(fhandle, buffer, to_write);
 }
 
 ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
-    
-    if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0)
-        return -1;
+     
     open_file_entry_t *file = get_open_file_entry(fhandle);
     if (file == NULL) {
         pthread_mutex_unlock(&file_entry_mutex[fhandle]);
@@ -149,10 +131,6 @@ ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
     }
 
     // here I am trusting that the open file entry stores a valid inumber 
-    if (pthread_rwlock_rdlock(&inode_rwlock[file->of_inumber]) != 0) {
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
-        return -1;
-    }
     /* From the open file table entry, we get the inode */
     inode_t *inode = inode_get(file->of_inumber);
     if (inode == NULL) {
@@ -174,7 +152,8 @@ ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
             error = 1;
         return error ? -1 : 0; 
     }
-
+    
+    // COPIED TO HERE
     ssize_t read = inode_read(inode, buffer, to_read, file->of_offset);
 
     if (pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]) != 0) 
@@ -200,18 +179,12 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
     int fhandle = tfs_open(source_path, 0); // flags == 0 means open for reading at beginning 
     if (fhandle == -1)
         return -1;
+    int error_code = fd_copy(fhandle, dest_path);
     // the mutex here will only be rarely, if ever needed. this is because we just returned this fhandle from
     // tfs_open and as such no one else has this information (the handle). However, we keep it here to prevent
     // cases where some other thread had this same fhandle related to a previous use of the same index (sort of but not really like the ABA problem)
     if (pthread_mutex_lock(&file_entry_mutex[fhandle]) != 0) {
         tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
-        return -1;
-    }
-    open_file_entry_t *source_file = get_open_file_entry(fhandle);
-
-    if (source_file == NULL) {
-        tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
-        pthread_mutex_unlock(&file_entry_mutex[fhandle]);
         return -1;
     }
 
@@ -288,5 +261,8 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
         ret_code = -1;
     if (to_read != 0) // there were still bytes to be read
         ret_code = -1;
+
+    // NEW
+    tfs_close(fhandle); // we're not checking the return value because we're going to throw an error anyway
     return ret_code; 
 }

@@ -1,3 +1,4 @@
+1- Isto tá a meio de 1 refatorização: a fd_read/fd_write/fd_copy parecem me bem mas devem ser revistas. Mais importante é rever a tfs_open
 1- Fazer a fd_read e file_copy_to_external. Na copy_to_external usar ou mmap e memcpy ou uma buffer auxiliar e vários reads
 1-  Notar que quando estou a fazer tfs_close não há dependencia da open_file_entry
 1- passar a valid inumber e valid file handle para nao serem static, e assim poder utilizar no operations. Antes de fazer lock aos trincos, verificar se os indices sao validos
