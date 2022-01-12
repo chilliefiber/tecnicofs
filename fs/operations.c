@@ -48,7 +48,7 @@ int tfs_open(char const *name, int flags) {
     // to prevent the creation of 2 files with the same name we lock
     // the root directory here. This way the first to lock will create the
     // file, and the second one will receive the inum in tfs_lookup 
-    // Note that if I put the lock inside tfs_lookup or in find_in_dir the first file would not have
+    // Note that although there is a rwlock in find_in_dir with only that the first file would not have
     // been created in time for the second file to know
     if (pthread_mutex_lock(&root_dir_mutex) != 0)
         return -1;

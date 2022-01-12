@@ -118,61 +118,68 @@ int state_destroy() {
 int inode_create(inode_type n_type) {
     if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) // placed here so that we don't lock/unlock every iteration
         return -1;
+    int ret_code = -1;
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
         if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) 
             insert_delay(); // simulate storage access delay (to freeinode_ts)
+        
         if (freeinode_ts[inumber] == FREE) {
             insert_delay(); // simulate storage access delay (to i-node)
             if (pthread_rwlock_init(&(inode_table[inumber].i_rwlock), NULL) != 0) { 
                 pthread_mutex_unlock(&freeinode_ts_mutex);
                 return -1;
             }
-            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0) { // POSSIBLE NOT CRITICAL
+            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0){  // POSSIBLE NOT CRITICAL
                 pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)); 
-            inode_table[inumber].i_node_type = n_type;
-            
-            if (n_type == T_DIRECTORY) {
-                int b = data_block_alloc(); 
-                if (b == -1) {
-                    pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)); 
-                    pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
-                    pthread_mutex_unlock(&freeinode_ts_mutex); 
-                    return -1; 
-                }
-
-                inode_table[inumber].i_size = BLOCK_SIZE; 
-                inode_table[inumber].i_data_blocks[0] = b; 
-
-                dir_entry_t *dir_entry = (dir_entry_t *)data_block_get(b);
-                if (dir_entry == NULL) { 
-                    pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)); 
-                    pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
-                    pthread_mutex_unlock(&freeinode_ts_mutex);
-                    return -1;
-                }
-                for (size_t i = 0; i < MAX_DIR_ENTRIES; i++)  
-                    dir_entry[i].d_inumber = -1;
-            } else {
-                if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
-                    return -1; // DUVIDA same one, inode not properly initialized. Maybe use the ret_code trick?
-                /* In case of a new file, simply sets its size to 0 */
-                inode_table[inumber].i_size = 0;
-                inode_table[inumber].i_data_blocks[0] = -1;
-            }
-            // seja um diretório seja um ficheiro normal, inicializamos as referências para lá do primeiro bloco como nulas
-            for (int block_number = 1; block_number < INODE_DIRECT_REFERENCES; block_number++)
-                inode_table[inumber].i_data_blocks[block_number] = -1;
-            inode_table[inumber].i_indirect_data_block = -1;
-            // CRITICAL SECTION END inode_table for writing
-            
-            freeinode_ts[inumber] = TAKEN;
-            if(pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+                pthread_mutex_unlock(&freeinode_ts_mutex);
                 return -1;
-            return inumber;
-        
+            }
+            ret_code = inode_init(inumber);
+            if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0) {
+                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
+                pthread_mutex_unlock(&freeinode_ts_mutex);
+                return -1;
+            }
+            if (ret_code == -1) {
+                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
+                pthread_mutex_unlock(&freeinode_ts_mutex);
+                return -1;
+            }
+            ret_code = inumber;
+            free_inode_ts[inumber] = FREE;
+            break; 
+        }
     }
-    pthread_mutex_unlock(&freeinode_ts_mutex);
-    return -1;
+    if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+        return -1; // for simplification, if we can't unlock the mutex the entry stays TAKEN
+    return ret_code;
+}
+
+static int inode_init(int inumber, inode_type n_type) {
+    inode_table[inumber].i_node_type = n_type;
+    if (n_type == T_DIRECTORY) {
+        int b = data_block_alloc(); 
+        if (b == -1) 
+            return -1; 
+        inode_table[inumber].i_size = BLOCK_SIZE; 
+        inode_table[inumber].i_data_blocks[0] = b; 
+
+        dir_entry_t *dir_entry = (dir_entry_t *)data_block_get(b);
+        if (dir_entry == NULL)  
+            return -1;
+        
+        for (size_t i = 0; i < MAX_DIR_ENTRIES; i++)  
+            dir_entry[i].d_inumber = -1;
+    } else {
+        /* In case of a new file, simply sets its size to 0 */
+        inode_table[inumber].i_size = 0;
+        inode_table[inumber].i_data_blocks[0] = -1;
+    }
+    // doesn't matter if it's a directory or a new file, the blocks apart from the first one are empty
+    for (int block_number = 1; block_number < INODE_DIRECT_REFERENCES; block_number++)
+        inode_table[inumber].i_data_blocks[block_number] = -1;
+    inode_table[inumber].i_indirect_data_block = -1;
+    return 0;
 }
 
 /*
@@ -586,25 +593,26 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
         return -1;
     }
 
-    insert_delay(); // simulate storage access delay to i-node with inumber
-    // CRITICAL SECTION START read inode_table
-    if (inode_table[inumber].i_node_type != T_DIRECTORY) {
-        // CRITICAL SECTION END read inode_table
+    if (strlen(sub_name) == 0) {
         return -1;
     }
-
-    if (strlen(sub_name) == 0) {
+    insert_delay(); // simulate storage access delay to i-node with inumber
+    if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;
+    if (inode_table[inumber].i_node_type != T_DIRECTORY) {
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
 
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
-    // CRITICAL SECTION END read inode_table, if we are protecting data blocks (which we aren't)
-    // so the end is really at the end of the function, where we end the dependency on the data block
     if (dir_entry == NULL) {
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
+
+    int ret_code = -1;
 
     /* Finds and fills the first empty entry */
     for (size_t i = 0; i < MAX_DIR_ENTRIES; i++) {
@@ -612,11 +620,15 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
             dir_entry[i].d_inumber = sub_inumber;
             strncpy(dir_entry[i].d_name, sub_name, MAX_FILE_NAME - 1);
             dir_entry[i].d_name[MAX_FILE_NAME - 1] = 0;
-            return 0;
+            ret_code = 0;
+            break;
         }
     }
 
-    return -1; // there was no space for another entry in the directory
+    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;
+    
+    return ret_code; 
 }
 
 /* Looks for a given name inside a directory
@@ -634,31 +646,35 @@ int find_in_dir(int inumber, char const *sub_name) {
     // the critical sections are still highlighted, because maybe (in the exam perhaps)
     // this might have to change, with multiple directories for example, and then this
     // function won't be MT safe
-    if (!valid_inumber(inumber) ||
-        inode_table[inumber].i_node_type != T_DIRECTORY) {
+    if (!valid_inumber(inumber)) {
         // CRITICAL SECTION END inode_table
         return -1;
     }
-
+    if (pthread_rwlock_rdlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;
+    if (inode_table[inumber].i_node_type != T_DIRECTORY) {
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
+        return -1;
+    }
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
-    // CRITICAL SECTION END inode_table this is wrong! it is only 
-    // the end of the critical section if we protect the data block: since we don't
-    // the critical section ends when we stop using the data block's data
     if (dir_entry == NULL) {
         return -1;
     }
 
+    int ret_value = -1;
     /* Iterates over the directory entries looking for one that has the target
      * name */
     for (int i = 0; i < MAX_DIR_ENTRIES; i++)
         if ((dir_entry[i].d_inumber != -1) &&
             (strncmp(dir_entry[i].d_name, sub_name, MAX_FILE_NAME) == 0)) {
-            return dir_entry[i].d_inumber;
+            ret_value = dir_entry[i].d_inumber;
+            break;
         }
-
-    return -1;
+    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;
+    return ret_value;
 }
 
 /*
