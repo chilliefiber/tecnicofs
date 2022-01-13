@@ -65,8 +65,9 @@ int inode_create(inode_type n_type);
 int inode_delete(int inumber);
 int inode_clear_file_contents(inode_t *inode);
 inode_t *inode_get(int inumber);
-ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset);
-ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset);
+int inode_dump(inode_t *inode, FILE *dest_file);
+ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset, bool append);
+ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset, bool append);
 
 int clear_dir_entry(int inumber, int sub_inumber);
 int add_dir_entry(int inumber, int sub_inumber, char const *sub_name);
@@ -76,7 +77,7 @@ int data_block_alloc();
 int data_block_free(int block_number);
 void *data_block_get(int block_number);
 
-int add_to_open_file_table(int inumber, size_t offset);
+open_file_entry_t *add_to_open_file_table(int *fhandle);
 int remove_from_open_file_table(int fhandle);
 open_file_entry_t *get_open_file_entry(int fhandle);
 

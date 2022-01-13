@@ -37,9 +37,25 @@ int tfs_lookup(char const *name) {
     return find_in_dir(ROOT_DIR_INUM, name);
 }
 
+static int file_init(int inumber, bool append) {
+    int fhandle;
+    open_file_entry_t *file = add_to_open_file_table(&fhandle);
+    if (file == NULL)
+        return -1;
+    if (pthread_mutex_lock(&(file->of_mutex)) != 0) // POSSIBLE CRITICAL SECTION I think it's not a critical section because we just created the file, and no one has its fhandle
+        return -1;
+    file->of_inumber = inumber;
+    file->of_offset = 0; // we ignore the offset if it's a file opened for appending
+    file->of_append = append;
+    if (pthread_mutex_unlock(&(file->of_mutex)) != 0) {
+        tfs_close(fhandle);
+        return -1;
+    }
+    return fhandle;
+}
+
 int tfs_open(char const *name, int flags) {
     int inum;
-    size_t offset;
     /* Checks if the path name is valid */
     if (!valid_pathname(name)) { // note that thanks to this check it is impossible to open the root directory. 
         return -1;
@@ -95,22 +111,6 @@ int tfs_open(char const *name, int flags) {
      * opened but it remains created */
 }
 
-static int file_init(int inumber, bool append) {
-    int fhandle;
-    open_file_entry_t *file = add_to_open_file_table(&fhandle);
-    if (file == NULL)
-        return -1;
-    if (pthread_mutex_lock(&(file->of_mutex)) != 0) // POSSIBLE CRITICAL SECTION I think it's not a critical section because we just created the file, and no one has its fhandle
-        return -1;
-    file->of_inumber = inumber;
-    file->of_offset = 0; // we ignore the offset if it's a file opened for appending
-    file->of_append = append;
-    if (pthread_mutex_unlock(&(file->of_mutex)) != 0) {
-        tfs_close(fhandle);
-        return -1;
-    }
-    return fhandle;
-}
 
 int tfs_close(int fhandle) { return remove_from_open_file_table(fhandle); }
 
@@ -142,6 +142,11 @@ ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
     if (pthread_mutex_lock(&(file->of_mutex)) != 0)
         return -1;
 
+    inode_t *inode = inode_get(file->of_inumber);
+    if (inode == NULL) { 
+        pthread_mutex_unlock(&(file->of_mutex)); // no need to check for error values
+        return -1;
+    }
     ssize_t bytes_read = inode_read(inode, buffer, len, file->of_offset, file->of_append);
     
     if (bytes_read > 0)
@@ -173,13 +178,13 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
     // now we know there is an inode for this source file, so we can create the new file in the external fs
     FILE *dest_file = fopen(dest_path, "w");
     if (!dest_file) {
-        pthread_mutex_unlock(&source_file);
+        pthread_mutex_unlock(&source_file->of_mutex);
         return -1; 
     }
 
     int ret_code = inode_dump(inode, dest_file);
 
-    if (pthread_mutex_unlock(source_file->of_mutex) != 0)
+    if (pthread_mutex_unlock(&source_file->of_mutex) != 0)
         ret_code = -1;
     if (tfs_close(fhandle) != 0)
         ret_code = -1;

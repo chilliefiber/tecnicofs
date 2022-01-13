@@ -104,56 +104,49 @@ int state_init() {
     return 0;
 }
 
-int state_destroy() { 
-    return 0;
-}
-
-/*
- * Creates a new i-node in the i-node table.
- * Input:
- *  - n_type: the type of the node (file or directory)
- * Returns:
- *  new i-node's number if successfully created, -1 otherwise
- */
-int inode_create(inode_type n_type) {
+static int inodes_destroy() {
     if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) // placed here so that we don't lock/unlock every iteration
         return -1;
-    int ret_code = -1;
+    int ret_code = 0;
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
         if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) 
             insert_delay(); // simulate storage access delay (to freeinode_ts)
         
-        if (freeinode_ts[inumber] == FREE) {
+        if (freeinode_ts[inumber] == TAKEN) {
             insert_delay(); // simulate storage access delay (to i-node)
-            if (pthread_rwlock_init(&(inode_table[inumber].i_rwlock), NULL) != 0) { 
-                pthread_mutex_unlock(&freeinode_ts_mutex);
-                return -1;
-            }
-            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0){  // POSSIBLE NOT CRITICAL
-                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)); 
-                pthread_mutex_unlock(&freeinode_ts_mutex);
-                return -1;
-            }
-            ret_code = inode_init(inumber);
-            if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0) {
-                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
-                pthread_mutex_unlock(&freeinode_ts_mutex);
-                return -1;
-            }
-            if (ret_code == -1) {
-                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
-                pthread_mutex_unlock(&freeinode_ts_mutex);
-                return -1;
-            }
-            ret_code = inumber;
-            free_inode_ts[inumber] = FREE;
-            break; 
+            if (pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)) != 0)
+                ret_code = -1;
         }
     }
     if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
-        return -1; // for simplification, if we can't unlock the mutex the entry stays TAKEN
+        return -1;
     return ret_code;
 }
+
+static int open_files_destroy() {
+    if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
+        return -1;
+
+    int ret_code = 0;
+
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (free_open_file_entries[i] == TAKEN) {
+            if (pthread_mutex_destroy(&(open_file_table[i].of_mutex)) != 0)
+                ret_code = -1;
+        }
+    }
+    if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0)
+        return -1;
+    return ret_code;
+}
+
+int state_destroy() { 
+    int ret_code = inodes_destroy();
+    if (open_files_destroy() == -1)
+        ret_code = -1;
+    return ret_code;
+}
+
 
 static int inode_init(int inumber, inode_type n_type) {
     inode_table[inumber].i_node_type = n_type;
@@ -183,12 +176,54 @@ static int inode_init(int inumber, inode_type n_type) {
 }
 
 /*
+ * Creates a new i-node in the i-node table.
+ * Input:
+ *  - n_type: the type of the node (file or directory)
+ * Returns:
+ *  new i-node's number if successfully created, -1 otherwise
+ */
+int inode_create(inode_type n_type) {
+    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) // placed here so that we don't lock/unlock every iteration
+        return -1;
+    int ret_code = -1;
+    for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
+        if ((inumber * (int) sizeof(allocation_state_t) % BLOCK_SIZE) == 0) 
+            insert_delay(); // simulate storage access delay (to freeinode_ts)
+        
+        if (freeinode_ts[inumber] == FREE) {
+            insert_delay(); // simulate storage access delay (to i-node)
+            if (pthread_rwlock_init(&(inode_table[inumber].i_rwlock), NULL) != 0) { 
+                pthread_mutex_unlock(&freeinode_ts_mutex);
+                return -1;
+            }
+            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0){  // POSSIBLE NOT CRITICAL
+                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)); 
+                pthread_mutex_unlock(&freeinode_ts_mutex);
+                return -1;
+            }
+            ret_code = inode_init(inumber, n_type);
+
+            if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0 || ret_code == -1) {
+                pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock));
+                pthread_mutex_unlock(&freeinode_ts_mutex);
+                return -1;
+            }
+            ret_code = inumber;
+            freeinode_ts[inumber] = TAKEN; // the reason this is here is because if there was an error previously we want it to be FREE
+            break; 
+        }
+    }
+    if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0)
+        return -1; // for simplification, if we can't unlock the mutex the entry stays TAKEN
+    return ret_code;
+}
+
+
+/*
  * Deletes the i-node.
  * Input:
  *  - inumber: i-node's number
  * Returns: 0 if successful, -1 if failed
- * Note: when calling this function with a valid inumber, make sure it is protected by a write lock
- * on inode_table[inumber], as it writes over the inode (in inode_clear_file_contents)
  */
 int inode_delete(int inumber) {
     // simulate storage access delay (to i-node and freeinode_ts)
@@ -204,16 +239,17 @@ int inode_delete(int inumber) {
     // we don't need to use inode_get, we already have the delay and the valid inumber check
     int ret_code = inode_clear_file_contents(&inode_table[inumber]); 
 
-    freeinode_ts[inumber] = FREE; // possivelmente passar isto para o fim da função, tenho medo que com o paralelismo 
-                                  // eu liberte isto e depois ainda não limpei os data blocks e alguém escreve por cima: Update: desnecessário, ver Note
+    if (pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)) != 0)
+        ret_code = -1;
+
+    freeinode_ts[inumber] = FREE; 
     if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0) 
         ret_code = -1; 
     return ret_code;
 }
 
-// Note there might be an off by one problem here: if file_offset is BLOCK_SIZE this will return 1, however block 1 will not be allocated if
-// the size of the file is also BLOCK_SIZE, this is ok for all writes and reads where we have checked if the block exists, but if it's being
-// used to delete blocks caution is advised
+// Note there might be an off by one problem here if improperly used: if the original offset of a file is x and we want to access y bytes, 
+// the final offset which we access is x+y-1
 static inline int calculate_block_index(size_t file_offset) {
     return (int) file_offset / BLOCK_SIZE; // naughty cast. All casts signaled naughty are due to the original use of an int for block number
 }
@@ -267,11 +303,11 @@ int inode_clear_file_contents(inode_t *inode) {
     if (inode == NULL) 
         return -1;
     
-    if (pthread_rwlock_wrlock(&inode_rwlock[inum]) != 0)
+    if (pthread_rwlock_wrlock(&inode->i_rwlock) != 0)
         return -1;
      
     if (inode->i_size == 0) {// the file was empty, nothing to do
-        if (pthread_rwlock_unlock(&inode_rwlock[inum]) != 0)
+        if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
             return -1;
         return 0;
     }
@@ -292,7 +328,7 @@ int inode_clear_file_contents(inode_t *inode) {
     
     inode->i_size = 0;
     
-    if (pthread_rwlock_unlock(&inode_rwlock[inum]) != 0) 
+    if (pthread_rwlock_unlock(&inode->i_rwlock) != 0) 
         return -1;
  
     return ret_code; 
@@ -375,110 +411,10 @@ static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **in
     return block_number;
 }
 
-int inode_dump(inode_t *inode, FILE *dest_file) {
-    if (inode == NULL)
-        return -1;
-    if (pthread_rwlock_rdlock(&(inode->i_rwlock)) != 0)
-        return -1;
-    if (inode->i_size == 0) {
-        if (pthread_rwlock_unlock(&(inode->i_rwlock)) != 0)
-            return -1; 
-        return 0;
-    }
-    int last_block_ix = calculate_block_index(inode->i_size);     
-    int block_number = -1, ret_code = 0;
-    void *block = NULL;
-    int *indirect_block_data = NULL;
-    if (last_block_ix >= INODE_DIRECT_REFERENCES) { 
-        // in this case we check for errors immediately, because either we can copy the whole file or not
-        if ((indirect_block_data = (int*) data_block_get(inode->i_indirect_data_block)) == NULL) {
-            pthread_rwlock_unlock(&inode->i_rwlock);
-            return -1;
-        }
-    }
-    
-    size_t to_read_from_block, block_offset = 0, to_read = inode->i_size; 
-    for (int block_ix = 0; block_ix <= last_block_ix; block_ix++) { 
-        block_number = get_block_number_from_inode_index(inode, block_ix, indirect_block_data); // we don't check for an error here: data_block_get does that for us
-        block = data_block_get(block_number);
-        if (!block) {
-            ret_code = -1;
-            break;
-        to_read_from_block = calculate_bytes_to_access_in_block(block_offset, to_read);
-        if (fwrite(block, 1, to_read_from_block, dest_file) < to_read_from_block) {
-            ret_code = -1; // there was an error writing to the destination file
-            break;
-        }
-        to_read -= to_read_from_block;
-    }
-    if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
-        ret_code = -1;
-    return ret_code;
-}
- 
-// I need to pass the open_file_entry_t to correct the offset in case of append
-ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset, bool append) {
-    if (inode == NULL)  
-        return -1;
-    if (pthread_rwlock_wrlock(&inode->i_rwlock) != 0) {
-        return -1;
-    }
-    if (append)
-        file_offset = inode->i_size;
-    else if (file_offset > inode->i_size) {// in this case we are trying to make a "hole" in the file, writing past its end
-        pthread_rwlock_unlock(&inode->);
-        return -1;
-    }
-    if (file_offset + to_write > MAX_FILE_SIZE)  
-        to_write = MAX_FILE_SIZE - file_offset;
-    ssize_t ret_code = 0;
-    if (to_write == 0) {
-        if (pthread_rwlock_wrlock(&inode_rwlock[file->of_inumber]) != 0)
-            ret_code = -1;
-        return ret_code;
-    }
-
-    size_t bytes_written = inode_write_in_blocks(inode, file, to_write, buffer);
-
-    pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
-    
-    if (bytes_written == 0) // if bytes_written is 0 at this point there was an error before we could write anything
-        return -1;
-
-    return (ssize_t) bytes_written;
-}
-
-ssize_t inode_read(inode_t *inode, void const *buffer, size_t to_read, size_t file_offset, bool append) {
-    if (inode == NULL) 
-        return -1;
-    if (append)
-        return 0; // we can't read any bytes from a file opened for appending
-    if (pthread_rwlock_rdlock(&inode_rwlock[file->of_inumber]) != 0) 
-        return -1;
-    // this might happen if someone in another thread truncates the file between someone else calling this function and the lock on the inode
-    if (file_offset > inode->i_size) {  
-        pthread_rwlock_unlock(&inode_rwlock[file->of_inumber]);
-        return -1;
-    }                   
-    size_t available_bytes = inode->i_size - file_offset;
-    if (to_read > available_bytes)
-        to_read = available_bytes;
-    if (to_read == 0) {
-        if (pthread_rwlock_unlock(&inode_rwlock[file->of_inumber] != 0)
-            return -1;
-        return 0;
-    }
-    size_t bytes_read = inode_read_from_blocks(inode, buffer, to_read, file_offset); 
-    // in this case there was an error, because there were bytes to be read that we couldn't read
-    if (bytes_read == 0) 
-        return -1;
-    return bytes_read;
-} 
-
-static size_t inode_write_in_blocks(inode_t *inode, open_file_entry_t *file, size_t to_write, void *buffer) {
-    int first_block_ix = calculate_block_index(file->of_offset); 
-    int last_block_ix = calculate_block_index(file->of_offset + to_write);
-    size_t block_offset = calculate_block_offset(file->of_offset); // offset in the block we are currently reading from, which right now is first_block
+static size_t inode_write_in_blocks(inode_t *inode, const void *buffer, size_t to_write, size_t file_offset) {
+    int first_block_ix = calculate_block_index(file_offset); 
+    int last_block_ix = calculate_block_index(file_offset + to_write - 1);
+    size_t block_offset = calculate_block_offset(file_offset); // offset in the block we are currently reading from, which right now is first_block
     int block_number = -1;
     void *block = NULL;
     int *indirect_block_data = NULL;
@@ -505,20 +441,20 @@ static size_t inode_write_in_blocks(inode_t *inode, open_file_entry_t *file, siz
         to_write_in_block = calculate_bytes_to_access_in_block(block_offset, to_write);
         /* Perform the actual write */
         memcpy(block + block_offset, buffer, to_write_in_block);
-        bytes_written += (ssize_t) to_write_in_block;
-        file->of_offset += to_write_in_block;
+        bytes_written += to_write_in_block;
+        file_offset += to_write_in_block;
         buffer += to_write_in_block;
         to_write -= to_write_in_block;
         block_offset = 0; // offset is possibly not 0 in the first iteration, but in the other ones it's definitely 0
-        if (file->of_offset > inode->i_size)
-            inode->i_size = file->of_offset;
+        if (file_offset > inode->i_size)
+            inode->i_size = file_offset;
     }
     return bytes_written;
 }
-static size_t inode_read_from_blocks(inode_t *inode, open_file_entry_t *file, size_t to_read, void *buffer) {
-inode_t *inode, void const *buffer, size_t to_read, size_t file_offset
+
+static size_t inode_read_from_blocks(inode_t *inode, void *buffer, size_t to_read, size_t file_offset) {
     int first_block_ix = calculate_block_index(file_offset); // index of the first block from which we will be reading
-    int last_block_ix = calculate_block_index(file_offset + to_read); // index of the last block from which we will be reading
+    int last_block_ix = calculate_block_index(file_offset + to_read - 1); // index of the last block from which we will be reading
     size_t block_offset = calculate_block_offset(file_offset); // offset in the block we are currently reading from, which right now is first_block
     int block_number = -1;
     void *block = NULL;
@@ -548,6 +484,110 @@ inode_t *inode, void const *buffer, size_t to_read, size_t file_offset
     return bytes_read;
 }
 
+int inode_dump(inode_t *inode, FILE *dest_file) {
+    if (inode == NULL)
+        return -1;
+    if (pthread_rwlock_rdlock(&(inode->i_rwlock)) != 0)
+        return -1;
+    if (inode->i_size == 0) {
+        if (pthread_rwlock_unlock(&(inode->i_rwlock)) != 0)
+            return -1; 
+        return 0;
+    }
+    int last_block_ix = calculate_block_index(inode->i_size - 1); // see this function for an explanation for the -1
+    int block_number = -1, ret_code = 0;
+    void *block = NULL;
+    int *indirect_block_data = NULL;
+    if (last_block_ix >= INODE_DIRECT_REFERENCES) { 
+        // in this case we check for errors immediately, because either we can copy the whole file or not
+        if ((indirect_block_data = (int*) data_block_get(inode->i_indirect_data_block)) == NULL) {
+            pthread_rwlock_unlock(&inode->i_rwlock);
+            return -1;
+        }
+    }
+    
+    size_t to_read_from_block, block_offset = 0, to_read = inode->i_size; 
+    for (int block_ix = 0; block_ix <= last_block_ix; block_ix++) { 
+        block_number = get_block_number_from_inode_index(inode, block_ix, indirect_block_data); // we don't check for an error here: data_block_get does that for us
+        block = data_block_get(block_number);
+        if (!block) {
+            ret_code = -1;
+            break;
+        }
+        to_read_from_block = calculate_bytes_to_access_in_block(block_offset, to_read);
+        if (fwrite(block, 1, to_read_from_block, dest_file) < to_read_from_block) {
+            ret_code = -1; // there was an error writing to the destination file
+            break;
+        }
+        to_read -= to_read_from_block;
+    }
+    if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
+        ret_code = -1;
+    return ret_code;
+}
+ 
+// I need to pass the open_file_entry_t to correct the offset in case of append
+ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset, bool append) {
+    if (inode == NULL)  
+        return -1;
+    if (pthread_rwlock_wrlock(&inode->i_rwlock) != 0) {
+        return -1;
+    }
+    if (append)
+        file_offset = inode->i_size;
+    else if (file_offset > inode->i_size) {// in this case we are trying to make a "hole" in the file, writing past its end
+        pthread_rwlock_unlock(&inode->i_rwlock);
+        return -1;
+    }
+    if (file_offset + to_write > MAX_FILE_SIZE)  
+        to_write = MAX_FILE_SIZE - file_offset;
+    ssize_t ret_code = 0;
+    if (to_write == 0) {
+        if (pthread_rwlock_wrlock(&inode->i_rwlock) != 0)
+            ret_code = -1;
+        return ret_code;
+    }
+
+    size_t bytes_written = inode_write_in_blocks(inode, buffer, to_write, file_offset);
+
+    pthread_rwlock_unlock(&inode->i_rwlock);
+    
+    if (bytes_written == 0) // if bytes_written is 0 at this point there was an error before we could write anything
+        return -1;
+
+    return (ssize_t) bytes_written;
+}
+
+ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset, bool append) {
+    if (inode == NULL) 
+        return -1;
+    if (append)
+        return 0; // we can't read any bytes from a file opened for appending
+    if (pthread_rwlock_rdlock(&inode->i_rwlock) != 0) 
+        return -1;
+    // this might happen if someone in another thread truncates the file between someone else calling this function and the lock on the inode
+    if (file_offset > inode->i_size) {  
+        pthread_rwlock_unlock(&inode->i_rwlock);
+        return -1;
+    }                   
+    size_t available_bytes = inode->i_size - file_offset;
+    if (to_read > available_bytes)
+        to_read = available_bytes;
+    if (to_read == 0) {
+        if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
+            return -1;
+        return 0;
+    }
+    size_t bytes_read = inode_read_from_blocks(inode, buffer, to_read, file_offset); 
+    if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
+        return -1;
+    // in this case there was an error, because there were bytes to be read that we couldn't read
+    if (bytes_read == 0) 
+        return -1;
+    return (ssize_t) bytes_read;
+} 
+
+
 /*
  * Returns a pointer to an existing i-node.
  * Input:
@@ -568,18 +608,6 @@ inode_t *inode_get(int inumber) {
     return &inode_table[inumber];
 }
 
-//
-size_t inode_get_size(inode_t *inode, int inumber) {
-    if (inode == NULL && (inode = inode_get(inumber)) == NULL) // POSSIBLE CRITICAL
-        return 0; // should I returning an error here?
-    if (pthread_rwlock_rdlock(&inode_rwlock[inumber]) != 0)
-        return 0;
-    size_t size = inode->i_size;
-    if (pthread_rwlock_wrlock(&inode_rwlock[inumber]) != 0)
-        return 0; // ??? or should I return the size
-    return size;
-}
-
 /*
  * Adds an entry to the i-node directory data.
  * Input:
@@ -597,10 +625,7 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
         return -1;
     }
     insert_delay(); // simulate storage access delay to i-node with inumber
-    if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0)
-        return -1;
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
-        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
 
@@ -608,11 +633,8 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
     if (dir_entry == NULL) {
-        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
-
-    int ret_code = -1;
 
     /* Finds and fills the first empty entry */
     for (size_t i = 0; i < MAX_DIR_ENTRIES; i++) {
@@ -620,15 +642,11 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
             dir_entry[i].d_inumber = sub_inumber;
             strncpy(dir_entry[i].d_name, sub_name, MAX_FILE_NAME - 1);
             dir_entry[i].d_name[MAX_FILE_NAME - 1] = 0;
-            ret_code = 0;
-            break;
+            return 0;
         }
     }
 
-    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
-        return -1;
-    
-    return ret_code; 
+    return -1; 
 }
 
 /* Looks for a given name inside a directory
@@ -650,10 +668,7 @@ int find_in_dir(int inumber, char const *sub_name) {
         // CRITICAL SECTION END inode_table
         return -1;
     }
-    if (pthread_rwlock_rdlock(&(inode_table[inumber].i_rwlock)) != 0)
-        return -1;
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
-        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
     /* Locates the block containing the directory's entries */
@@ -663,18 +678,14 @@ int find_in_dir(int inumber, char const *sub_name) {
         return -1;
     }
 
-    int ret_value = -1;
     /* Iterates over the directory entries looking for one that has the target
      * name */
     for (int i = 0; i < MAX_DIR_ENTRIES; i++)
         if ((dir_entry[i].d_inumber != -1) &&
             (strncmp(dir_entry[i].d_name, sub_name, MAX_FILE_NAME) == 0)) {
-            ret_value = dir_entry[i].d_inumber;
-            break;
+            return dir_entry[i].d_inumber;
         }
-    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
-        return -1;
-    return ret_value;
+    return -1;
 }
 
 /*
@@ -744,18 +755,18 @@ void *data_block_get(int block_number) {
  */
 open_file_entry_t *add_to_open_file_table(int *fhandle) {
     if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
-        return -1;
+        return NULL;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         if (free_open_file_entries[i] == FREE) {
             free_open_file_entries[i] = TAKEN;
-            pthread_mutex_init(&(open_file_table[i]->of_mutex)); // always returns 0
+            pthread_mutex_init(&(open_file_table[i].of_mutex), NULL); // always returns 0
             if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0) {
-                pthread_mutex_destroy(&(open_file_table[i]->of_mutex));
+                pthread_mutex_destroy(&(open_file_table[i].of_mutex));
                 free_open_file_entries[i] = FREE; // DUVIDA posso fazer isto para nao ficar\ sempre TAKEN
                 return NULL;
             }
             *fhandle = i;
-            return open_file_table[i];
+            return &open_file_table[i];
         }
     }
     pthread_mutex_unlock(&free_open_file_entries_mutex);
@@ -781,7 +792,7 @@ int remove_from_open_file_table(int fhandle) {
     free_open_file_entries[fhandle] = FREE;
     if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0)
         return -1;
-    return 0;
+    return ret_code;
 }
 
 /* Returns pointer to a given entry in the open file table

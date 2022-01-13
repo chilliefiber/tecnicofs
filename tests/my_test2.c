@@ -11,7 +11,9 @@
    This test fills in a new file via multiple writes, 
    where some calls to tfs_write may imply filling in 2 consecutive blocks, 
    then checks if the file contents are as expected.
-   It checks this using multiple threads, with the same fd
+   It checks this using multiple threads, with the same fd. It doesn't demonstrate
+   a gain in performance versus the sequential version, but it shows that there are no
+   data races accessing the file descriptor.
  */
 
 

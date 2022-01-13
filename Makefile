@@ -14,7 +14,7 @@ INCLUDES = $(addprefix -I, $(INCLUDE_DIRS))
 SOURCES  := $(wildcard */*.c)
 HEADERS  := $(wildcard */*.h)
 OBJECTS  := $(SOURCES:.c=.o)
-TARGET_EXECS := tests/test1 tests/copy_to_external_simple tests/copy_to_external_errors tests/write_10_blocks_spill tests/write_10_blocks_simple tests/write_more_than_10_blocks_simple tests/my_test1 tests/my_test2 tests/my_test3
+TARGET_EXECS := tests/test1 tests/copy_to_external_simple tests/copy_to_external_errors tests/write_10_blocks_spill tests/write_10_blocks_simple tests/write_more_than_10_blocks_simple tests/my_test1 tests/my_test2 tests/my_test3 tests/copy_to_external_different_char tests/copy_to_external_direct_blocks tests/copy_to_external_huge_file tests/copy_to_external_indirect_blocks tests/copy_to_external_int tests/copy_to_external_multiple_char tests/copy_to_external_short_str tests/max_storage_exceeded tests/tfs_built_in_functions tests/write_all_direct_blocks tests/write_max_bytes tests/write_more_than_10_blocks_spill tests/write_more_than_1_block
 
 # VPATH is a variable used by Makefile which finds *sources* and makes them available throughout the codebase
 # vpath %.h <DIR> tells make to look for header files in <DIR>
@@ -75,7 +75,20 @@ tests/write_more_than_10_blocks_simple: tests/write_more_than_10_blocks_simple.o
 tests/my_test1: tests/my_test1.o fs/operations.o fs/state.o
 tests/my_test2: tests/my_test2.o fs/operations.o fs/state.o
 tests/my_test3: tests/my_test3.o fs/operations.o fs/state.o
-
+#sofia
+tests/copy_to_external_different_char: tests/copy_to_external_different_char.o fs/operations.o fs/state.o
+tests/copy_to_external_direct_blocks: tests/copy_to_external_direct_blocks.o fs/operations.o fs/state.o
+tests/copy_to_external_huge_file: tests/copy_to_external_huge_file.o fs/operations.o fs/state.o
+tests/copy_to_external_indirect_blocks: tests/copy_to_external_indirect_blocks.o fs/operations.o fs/state.o
+tests/copy_to_external_int: tests/copy_to_external_int.o fs/operations.o fs/state.o
+tests/copy_to_external_multiple_char: tests/copy_to_external_multiple_char.o fs/operations.o fs/state.o
+tests/copy_to_external_short_str: tests/copy_to_external_short_str.o fs/operations.o fs/state.o 
+tests/max_storage_exceeded: tests/max_storage_exceeded.o fs/operations.o fs/state.o
+tests/tfs_built_in_functions: tests/tfs_built_in_functions.o fs/operations.o fs/state.o
+tests/write_all_direct_blocks: tests/write_all_direct_blocks.o fs/operations.o fs/state.o
+tests/write_max_bytes: tests/write_max_bytes.o fs/operations.o fs/state.o
+tests/write_more_than_10_blocks_spill: tests/write_more_than_10_blocks_spill.o fs/operations.o fs/state.o
+tests/write_more_than_1_block: tests/write_more_than_1_block.o fs/operations.o fs/state.o
 clean:
 	rm -f $(OBJECTS) $(TARGET_EXECS)
 
