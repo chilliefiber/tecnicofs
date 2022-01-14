@@ -1,7 +1,6 @@
-1- Isto tá a meio de 1 refatorização: a fd_read/fd_write/fd_copy parecem me bem mas devem ser revistas. Mais importante é rever a tfs_open/inode_create
-2- Analisar bem todos os uso do diretório raiz
-1-  Notar que quando estou a fazer tfs_close não há dependencia da open_file_entry
-1- passar a valid inumber e valid file handle para nao serem static, e assim poder utilizar no operations. Antes de fazer lock aos trincos, verificar se os indices sao validos
-(valida apenas se os trincos estiverem no operations)
-4- comentar estas funções novas (inode_read/inode_write/inode_clear_contents)
+1- Acabar de reler o código, especialmente relativo aos open/close init/destroy. O operations já o li
+2- Analisar bem todos os TODO, limpar comentários desnecessários
+3- comentar as novas (inode_read/inode_write/inode_clear_contents)
+4- Ao submeter, compilar com make fmt e depois make clean, retirando o fsanitize da entrega. Enviar apenas os meus testes
+
 

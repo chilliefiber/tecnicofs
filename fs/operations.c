@@ -64,8 +64,6 @@ int tfs_open(char const *name, int flags) {
     // to prevent the creation of 2 files with the same name we lock
     // the root directory here. This way the first to lock will create the
     // file, and the second one will receive the inum in tfs_lookup 
-    // Note that although there is a rwlock in find_in_dir with only that the first file would not have
-    // been created in time for the second file to know
     if (pthread_mutex_lock(&root_dir_mutex) != 0)
         return -1;
     inum = tfs_lookup(name);
@@ -155,7 +153,7 @@ ssize_t tfs_read(int fhandle, void *buffer, size_t len) {
     if (pthread_mutex_unlock(&(file->of_mutex)) != 0)
         bytes_read = -1; 
     
-    return (ssize_t) bytes_read; 
+    return bytes_read; 
 }
 
 int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {

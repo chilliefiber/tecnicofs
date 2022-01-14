@@ -75,9 +75,6 @@ static void insert_delay() {
  * Initializes FS state
  */
 int state_init() {
-    // Note: in this function I lock the whole iteration  
-    // this is because locking/unlocking with each access could be slower
-    // and the function is only supposed to be called once
     if (pthread_mutex_lock(&freeinode_ts_mutex) != 0)
         return -1;
     for (size_t i = 0; i < INODE_TABLE_SIZE; i++) {
@@ -105,7 +102,7 @@ int state_init() {
 }
 
 static int inodes_destroy() {
-    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) // placed here so that we don't lock/unlock every iteration
+    if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) 
         return -1;
     int ret_code = 0;
     for (int inumber = 0; inumber < INODE_TABLE_SIZE; inumber++) {
@@ -379,7 +376,7 @@ static int get_block_number_from_inode_index(inode_t *inode, int block_ix, int *
             return -1;
     }
     block_ix -= INODE_DIRECT_REFERENCES; // now block_ix has the index inside of the indirect block
-    return indirect_block_data[block_ix]; // here is where we might touch unitialised memory
+    return indirect_block_data[block_ix]; 
 }
 
 static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **indirect_block_data) {
@@ -414,7 +411,7 @@ static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **in
 static size_t inode_write_in_blocks(inode_t *inode, const void *buffer, size_t to_write, size_t file_offset) {
     int first_block_ix = calculate_block_index(file_offset); 
     int last_block_ix = calculate_block_index(file_offset + to_write - 1);
-    size_t block_offset = calculate_block_offset(file_offset); // offset in the block we are currently reading from, which right now is first_block
+    size_t block_offset = calculate_block_offset(file_offset); 
     int block_number = -1;
     void *block = NULL;
     int *indirect_block_data = NULL;
@@ -526,7 +523,6 @@ int inode_dump(inode_t *inode, FILE *dest_file) {
     return ret_code;
 }
  
-// I need to pass the open_file_entry_t to correct the offset in case of append
 ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset, bool append) {
     if (inode == NULL)  
         return -1;
@@ -543,14 +539,15 @@ ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t 
         to_write = MAX_FILE_SIZE - file_offset;
     ssize_t ret_code = 0;
     if (to_write == 0) {
-        if (pthread_rwlock_wrlock(&inode->i_rwlock) != 0)
+        if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
             ret_code = -1;
         return ret_code;
     }
 
     size_t bytes_written = inode_write_in_blocks(inode, buffer, to_write, file_offset);
 
-    pthread_rwlock_unlock(&inode->i_rwlock);
+    if (pthread_rwlock_unlock(&inode->i_rwlock) != 0)
+        return -1;
     
     if (bytes_written == 0) // if bytes_written is 0 at this point there was an error before we could write anything
         return -1;
@@ -657,6 +654,9 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
  */
 int find_in_dir(int inumber, char const *sub_name) { 
     insert_delay(); // simulate storage access delay to i-node with inumber
+    if (!valid_inumber(inumber)) {
+        return -1;
+    }
     // CRITICAL SECTION START read inode_table 
     // this function is not part of the public API and it is only called
     // in operations.c inside tfs_lookup, where it is always protected by the mutex of the 
@@ -664,27 +664,28 @@ int find_in_dir(int inumber, char const *sub_name) {
     // the critical sections are still highlighted, because maybe (in the exam perhaps)
     // this might have to change, with multiple directories for example, and then this
     // function won't be MT safe
-    if (!valid_inumber(inumber)) {
-        // CRITICAL SECTION END inode_table
-        return -1;
-    }
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
+        // CRITICAL SECTION END inode_table
         return -1;
     }
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
     if (dir_entry == NULL) {
+        // CRITICAL SECTION END inode_table
         return -1;
     }
 
     /* Iterates over the directory entries looking for one that has the target
      * name */
-    for (int i = 0; i < MAX_DIR_ENTRIES; i++)
+    for (int i = 0; i < MAX_DIR_ENTRIES; i++) {
         if ((dir_entry[i].d_inumber != -1) &&
             (strncmp(dir_entry[i].d_name, sub_name, MAX_FILE_NAME) == 0)) {
+            // CRITICAL SECTION END inode_table
             return dir_entry[i].d_inumber;
         }
+    }
+    // CRITICAL SECTION END inode_table
     return -1;
 }
 
