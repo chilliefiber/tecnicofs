@@ -42,18 +42,9 @@ typedef struct {
     pthread_mutex_t of_mutex;
 } open_file_entry_t;
 
-#define MAX_DIR_ENTRIES (BLOCK_SIZE / sizeof(dir_entry_t)) // só existe 1 diretório, o root. Esse diretório só tem 1 bloco.
-                                                           // MAX_DIR_ENTRIES representa o máximo de entradas (ficheiros ou subdiretórios)
-// que um diretório guarda. Um diretório tem 1 bloco para armazenar informação sobre os seus ficheiros/subdiretórios, e cada entrada é do tipo dir_entry_t
+#define MAX_DIR_ENTRIES (BLOCK_SIZE / sizeof(dir_entry_t)) 
 
 
-// the thought process is that the indirect block can be interpreted as an array of indexes to blocks in 
-// the arrays fs_data and free_blocks. The functions, written by the professors (data_block_free etc) 
-// use an int as an index to these arrays. As such, the indirect block can contain MAX_INDIRECT_BLOCKS
-// indexes to data blocks. This constant wad originally defined in the .c and not the .h because files outside
-// of state.c don't deal with data blocks. It was moved to the .h file because it was useful to define MAX_FILE_SIZE
-// I don't like it this way very much, because many files might include state.h and they won't need MAX_INDIRECT_BLOCKS
-// because, again, they don't deal with data blocks. TODO: is this ok?
 #define MAX_INDIRECT_BLOCKS (BLOCK_SIZE / sizeof(int))
 
 #define MAX_FILE_SIZE (BLOCK_SIZE * (INODE_DIRECT_REFERENCES + MAX_INDIRECT_BLOCKS))  

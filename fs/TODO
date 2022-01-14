@@ -1,6 +1,4 @@
 1- Acabar de reler o código, especialmente relativo aos open/close init/destroy. O operations já o li
-2- Analisar bem todos os TODO, limpar comentários desnecessários
-3- comentar as novas (inode_read/inode_write/inode_clear_contents)
 4- Ao submeter, compilar com make fmt e depois make clean, retirando o fsanitize da entrega. Enviar apenas os meus testes
 
 

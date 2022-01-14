@@ -96,7 +96,10 @@ int state_init() {
         return -1;
     return 0;
 }
-
+/**
+ * Destroys the rwlocks of the inodes
+ *
+*/
 static int inodes_destroy() {
     if (pthread_mutex_lock(&freeinode_ts_mutex) != 0) 
         return -1;
@@ -116,6 +119,10 @@ static int inodes_destroy() {
     return ret_code;
 }
 
+/**
+ * Destroys the mutexes of the open files
+ *
+*/
 static int open_files_destroy() {
     if (pthread_mutex_lock(&free_open_file_entries_mutex) != 0)
         return -1;
@@ -133,6 +140,11 @@ static int open_files_destroy() {
     return ret_code;
 }
 
+
+/**
+ * Destroys all mutexes/rwlocks
+ *
+*/
 int state_destroy() { 
     int ret_code = inodes_destroy();
     if (open_files_destroy() == -1)
@@ -140,7 +152,13 @@ int state_destroy() {
     return ret_code;
 }
 
-
+/**
+ * Fills in a newly created inode.
+ * Input:
+ *  - inumber: inumber of the inode
+ *  - n_type: the type of the node (file or directory)
+ * Returns 0 on success, -1 on error
+ */
 static int inode_init(int inumber, inode_type n_type) {
     inode_table[inumber].i_node_type = n_type;
     if (n_type == T_DIRECTORY) {
@@ -288,6 +306,12 @@ static int free_indirect_block(int indirect_block_number, size_t i_size) {
     return ret_code;
 }
 
+/*
+ Clears all the data on an inode
+ Input:
+   - pointer to inode
+ Returns 0 on success, -1 on error
+*/
 int inode_clear_file_contents(inode_t *inode) {
     if (inode == NULL) 
         return -1;
@@ -370,6 +394,14 @@ static int get_block_number_from_inode_index(inode_t *inode, int block_ix, int *
     return indirect_block_data[block_ix]; 
 }
 
+/**
+ * Allocates a new data block for an inode
+ * Input
+ *  - block_ix index of the block in the inode (not in block table)
+    - inode which needs a new data block
+    - indirect_block_data data of the indirect block of the inode
+  Returns -1 on error, or the allocated block's number in the block table
+ */
 static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **indirect_block_data) {
     int block_number = -1;
     if (block_ix < INODE_DIRECT_REFERENCES) { 
@@ -399,6 +431,15 @@ static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **in
     return block_number;
 }
 
+/**
+ * Writes data in the inode's blocks
+ * Input
+    -inode where we will write
+    -buffer from where we copy the data
+    -to_write number of bytes to write in the inode
+    -file_offset starting offset of write operation
+   Returns number of bytes written
+ */
 static size_t inode_write_in_blocks(inode_t *inode, const void *buffer, size_t to_write, size_t file_offset) {
     int first_block_ix = calculate_block_index(file_offset); 
     int last_block_ix = calculate_block_index(file_offset + to_write - 1);
@@ -440,6 +481,16 @@ static size_t inode_write_in_blocks(inode_t *inode, const void *buffer, size_t t
     return bytes_written;
 }
 
+/* 
+ Reads data from blocks of inode
+ 
+ * Input
+    -inode from where we will copy
+    -buffer into which we copy the data
+    -to_read number of bytes to read into the buffer
+    -file_offset starting offset of read operation
+   Returns number of bytes read
+*/
 static size_t inode_read_from_blocks(inode_t *inode, void *buffer, size_t to_read, size_t file_offset) {
     int first_block_ix = calculate_block_index(file_offset); // index of the first block from which we will be reading
     int last_block_ix = calculate_block_index(file_offset + to_read - 1); // index of the last block from which we will be reading
@@ -472,6 +523,13 @@ static size_t inode_read_from_blocks(inode_t *inode, void *buffer, size_t to_rea
     return bytes_read;
 }
 
+/**
+ * Copies the whole contents of the inode into a file in an external fs
+ * Input
+ * -inode to be copied
+ * -dest_file external file
+ * Returns -1 on error, 0 on success
+ */
 int inode_dump(inode_t *inode, FILE *dest_file) {
     if (inode == NULL)
         return -1;
@@ -513,7 +571,17 @@ int inode_dump(inode_t *inode, FILE *dest_file) {
         ret_code = -1;
     return ret_code;
 }
- 
+
+/**
+ Write bytes from a buffer to the inode
+ Input:
+ - inode into which we write
+ - buffer from which we want to copy 
+ - to_write number of bytes to write
+ - file_offset starting offset of write operation
+ - append boolean that says if we should ignore the offset and write into the end of the file
+ Returns: number of bytes written on success, -1 on error
+ */
 ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t file_offset, bool append) {
     if (inode == NULL)  
         return -1;
@@ -546,6 +614,14 @@ ssize_t inode_write(inode_t *inode, void const *buffer, size_t to_write, size_t 
     return (ssize_t) bytes_written;
 }
 
+/**
+ * Read bytes from the inode into a buffer.
+ * Input:
+ * -inode from which we read bytes
+ * -buffer into which we write
+ * file_offset starting offset of read operation
+ * append boolean that says if we should ignore the offset and point it at end of file
+ */
 ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_offset, bool append) {
     if (inode == NULL) 
         return -1;
@@ -696,8 +772,7 @@ int data_block_alloc() {
         if (free_blocks[i] == FREE) {
             free_blocks[i] = TAKEN;
             if (pthread_mutex_unlock(&free_blocks_mutex) !=0) {
-                free_blocks[i] = FREE; // this is just so that the block doesn't stay forever TAKEN, but I don't know if it makes sense DUVIDA
-                return -1;
+                return -1; // for simplicity if there is an error here we don't put it back to FREE
             }
             return i;
         }
@@ -753,9 +828,7 @@ open_file_entry_t *add_to_open_file_table(int *fhandle) {
         if (free_open_file_entries[i] == FREE) {
             free_open_file_entries[i] = TAKEN;
             pthread_mutex_init(&(open_file_table[i].of_mutex), NULL); // always returns 0
-            if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0) {
-                pthread_mutex_destroy(&(open_file_table[i].of_mutex));
-                free_open_file_entries[i] = FREE; // DUVIDA posso fazer isto para nao ficar\ sempre TAKEN
+            if (pthread_mutex_unlock(&free_open_file_entries_mutex) != 0) { // if there is an error here for simplicity it stays TAKEN
                 return NULL;
             }
             *fhandle = i;
