@@ -42,7 +42,7 @@ static int file_init(int inumber, bool append) {
     open_file_entry_t *file = add_to_open_file_table(&fhandle);
     if (file == NULL)
         return -1;
-    if (pthread_mutex_lock(&(file->of_mutex)) != 0) // POSSIBLE CRITICAL SECTION I think it's not a critical section because we just created the file, and no one has its fhandle
+    if (pthread_mutex_lock(&(file->of_mutex)) != 0) 
         return -1;
     file->of_inumber = inumber;
     file->of_offset = 0; // we ignore the offset if it's a file opened for appending
@@ -161,22 +161,28 @@ int tfs_copy_to_external_fs(char const *source_path, char const *dest_path) {
     if (fhandle == -1)
         return -1;
     open_file_entry_t *source_file = get_open_file_entry(fhandle);
-    if (source_file == NULL)
+    if (source_file == NULL) {
+        tfs_close(fhandle);
         return -1;
+    }
     
-    if (pthread_mutex_lock(&(source_file->of_mutex)) != 0) // MAYBE REMOVE IF WE CAN ASSUME option as per Daniel's email:
+    if (pthread_mutex_lock(&(source_file->of_mutex)) != 0) {
+        tfs_close(fhandle);
         return -1;
+    }
     
     inode_t *inode = inode_get(source_file->of_inumber);
 
     if (inode == NULL) {
         pthread_mutex_unlock(&source_file->of_mutex);
+        tfs_close(fhandle);
         return -1;
     }
     // now we know there is an inode for this source file, so we can create the new file in the external fs
     FILE *dest_file = fopen(dest_path, "w");
     if (!dest_file) {
         pthread_mutex_unlock(&source_file->of_mutex);
+        tfs_close(fhandle);
         return -1; 
     }
 

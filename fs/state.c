@@ -11,21 +11,17 @@
  * memory; for simplicity, this project maintains it in primary memory) */
 
 /* I-node table */
-static inode_t inode_table[INODE_TABLE_SIZE]; // 1 trinco por posição
-static char freeinode_ts[INODE_TABLE_SIZE]; // 1 trinco para todo o mapa
+static inode_t inode_table[INODE_TABLE_SIZE];
+static char freeinode_ts[INODE_TABLE_SIZE];
 
 /* Data blocks */
-static char fs_data[BLOCK_SIZE * DATA_BLOCKS]; // sem trinco?
-static char free_blocks[DATA_BLOCKS]; // 1 trinco para todo o mapa
+static char fs_data[BLOCK_SIZE * DATA_BLOCKS];
+static char free_blocks[DATA_BLOCKS]; 
 
 /* Volatile FS state */
 
-// 1 trinco por posição
-static open_file_entry_t open_file_table[MAX_OPEN_FILES]; // aqui o indice corresponde noutras funções ao fhandle: não está relacionado com inumber, é como
-                                                          // o stdin é fd 0 mas não tem o inumber 0. penso que isto permita que o mesmo ficheiro tenha diferentes
-                                                          // entradas no 3, de modo a permitir concorrência com offsets diferentes
-// 1 trinco para toda a tabela
-static char free_open_file_entries[MAX_OPEN_FILES]; // indice igual ao de cima para a mesma entrada
+static open_file_entry_t open_file_table[MAX_OPEN_FILES]; 
+static char free_open_file_entries[MAX_OPEN_FILES]; 
 
 /* Mutexes for allocation tables */
 pthread_mutex_t freeinode_ts_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -193,7 +189,7 @@ int inode_create(inode_type n_type) {
                 pthread_mutex_unlock(&freeinode_ts_mutex);
                 return -1;
             }
-            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0){  // POSSIBLE NOT CRITICAL
+            if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0){  
                 pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)); 
                 pthread_mutex_unlock(&freeinode_ts_mutex);
                 return -1;
@@ -239,7 +235,8 @@ int inode_delete(int inumber) {
     if (pthread_rwlock_destroy(&(inode_table[inumber].i_rwlock)) != 0)
         ret_code = -1;
 
-    freeinode_ts[inumber] = FREE; 
+    freeinode_ts[inumber] = FREE;
+    // this is at the end of the function to prevent a FREE entry from not having its rwlock destroyed. It wo 
     if (pthread_mutex_unlock(&freeinode_ts_mutex) != 0) 
         ret_code = -1; 
     return ret_code;
@@ -250,8 +247,7 @@ int inode_delete(int inumber) {
 static inline int calculate_block_index(size_t file_offset) {
     return (int) file_offset / BLOCK_SIZE; // naughty cast. All casts signaled naughty are due to the original use of an int for block number
 }
-// Functions related to data blocks are static 
-// because files outside of state.c don't deal with data blocks (TODO: ask if all this is ok)
+
 /*
  * Frees all blocks referenced by the indirect block, and it also frees the indirect block
  * Input:
@@ -264,11 +260,7 @@ static inline int calculate_block_index(size_t file_offset) {
  */
 
 static int free_indirect_block(int indirect_block_number, size_t i_size) {
-    // the reason for the -1 is that if for example inode->i_size == BLOCK_SIZE, calculate_block_index will
-    // return 1, but the block with block_ix 1 isn't allocated. This would create a problem (without the -1) everytime
-    // inode->i_size % BLOCK_SIZE == 0 (inode->i_size points to beginning of a block). With the -1, the problem is solved, 
-    // and if the inode->i_size didn't point to the beginning of a block there will be no problem either way. Note that because of the
-    // required check that the indirect block is in use, inode->i_size -1 is always greater than 0
+    // Note that because of the required check that the indirect block is in use, inode->i_size -1 is always greater than 0
     int final_block_ix = calculate_block_index(i_size-1);
 
     final_block_ix -= INODE_DIRECT_REFERENCES; // now final_block_ix stores the index of the last block in the indirect block, and not the whole file
@@ -280,10 +272,7 @@ static int free_indirect_block(int indirect_block_number, size_t i_size) {
     if (!indirect_block_data) // an error ocurred
         return -1;
     
-    int ret_code = data_block_free(indirect_block_number); // if an error ocurred but we still received data
-    // from data_block_get it is very weird because the verification is the same. I decided to assume that the
-    // data is valid, and that it might contain references to blocks that need to be freed, but I still return
-    // the error to the calling function
+    int ret_code = 0;
 
     // this cleans all the data blocks referenced by the indirect block. block_index is the index in indirect_block_data
     // the actual block number is stored in indirect_block_data[block_index]
@@ -292,6 +281,9 @@ static int free_indirect_block(int indirect_block_number, size_t i_size) {
             ret_code = -1; // applying the same strategy of not returning while there might still be data to clean
         }
     }
+    
+    if (data_block_free(indirect_block_number) == -1)
+        ret_code = -1;
     
     return ret_code;
 }
@@ -318,7 +310,6 @@ int inode_clear_file_contents(inode_t *inode) {
         }
     }
     
-    // maybe I shouldn't do this verification here, and do it directly in free_indirect_block
     if (inode->i_indirect_data_block != -1 && free_indirect_block(inode->i_indirect_data_block, inode->i_size) == -1) {
         ret_code = -1;
     }
@@ -381,9 +372,9 @@ static int get_block_number_from_inode_index(inode_t *inode, int block_ix, int *
 
 static int allocate_new_block_for_writing(int block_ix, inode_t *inode, int **indirect_block_data) {
     int block_number = -1;
-    if (block_ix < INODE_DIRECT_REFERENCES) { // here we allocate a new direct block
+    if (block_ix < INODE_DIRECT_REFERENCES) { 
         inode->i_data_blocks[block_ix] = data_block_alloc(); // if this fails it will just store -1 there, which is ok because it's the value that's supposed to be there
-        block_number = inode->i_data_blocks[block_ix]; // if this -1 the error will be signalled when we return -1
+        block_number = inode->i_data_blocks[block_ix]; // if this -1 the error will be signalled when we return block_number
     }
     else {
         if (block_ix == INODE_DIRECT_REFERENCES) { // in this case we are going to allocate the first block referenced in the indirect block                       
@@ -590,11 +581,6 @@ ssize_t inode_read(inode_t *inode, void *buffer, size_t to_read, size_t file_off
  * Input:
  *  - inumber: identifier of the i-node
  * Returns: pointer if successful, NULL if failed
- * Note: as of right now inode_table's entries are not initialized in the beginning to a dummy value that indicates invalidness, nor
- * properly signalled as destroyed with such a value  when inode_delete is called (this is because the original code did neither of these things). 
- * As such there might be bugs wherein the inumber is valid but it was never initialized (so we will be accessing unitialized memory on the stack)
- * or it was once initialized but now has the values that inode_delete left there. This is not very good defensive programming, I believe I should
- * such a dummy value and if the value is the dummy return NULL
  */
 inode_t *inode_get(int inumber) {
     if (!valid_inumber(inumber)) {
@@ -622,7 +608,11 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
         return -1;
     }
     insert_delay(); // simulate storage access delay to i-node with inumber
+
+    if (pthread_rwlock_wrlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;    
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
 
@@ -630,20 +620,25 @@ int add_dir_entry(int inumber, int sub_inumber, char const *sub_name) {
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
     if (dir_entry == NULL) {
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
 
+    int ret_code = -1;
     /* Finds and fills the first empty entry */
     for (size_t i = 0; i < MAX_DIR_ENTRIES; i++) {
         if (dir_entry[i].d_inumber == -1) {
             dir_entry[i].d_inumber = sub_inumber;
             strncpy(dir_entry[i].d_name, sub_name, MAX_FILE_NAME - 1);
             dir_entry[i].d_name[MAX_FILE_NAME - 1] = 0;
-            return 0;
+            ret_code = 0;
+            break;
         }
     }
 
-    return -1; 
+    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
+        ret_code = -1;
+    return ret_code; 
 }
 
 /* Looks for a given name inside a directory
@@ -657,36 +652,33 @@ int find_in_dir(int inumber, char const *sub_name) {
     if (!valid_inumber(inumber)) {
         return -1;
     }
-    // CRITICAL SECTION START read inode_table 
-    // this function is not part of the public API and it is only called
-    // in operations.c inside tfs_lookup, where it is always protected by the mutex of the 
-    // root file placed in tfs_write. As such the whole function is covered by a mutex
-    // the critical sections are still highlighted, because maybe (in the exam perhaps)
-    // this might have to change, with multiple directories for example, and then this
-    // function won't be MT safe
+    if (pthread_rwlock_rdlock(&(inode_table[inumber].i_rwlock)) != 0)
+        return -1;    
     if (inode_table[inumber].i_node_type != T_DIRECTORY) {
-        // CRITICAL SECTION END inode_table
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
     /* Locates the block containing the directory's entries */
     dir_entry_t *dir_entry =
         (dir_entry_t *)data_block_get(inode_table[inumber].i_data_blocks[0]);
     if (dir_entry == NULL) {
-        // CRITICAL SECTION END inode_table
+        pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock));
         return -1;
     }
 
     /* Iterates over the directory entries looking for one that has the target
      * name */
+    int ret_value = -1;
     for (int i = 0; i < MAX_DIR_ENTRIES; i++) {
         if ((dir_entry[i].d_inumber != -1) &&
             (strncmp(dir_entry[i].d_name, sub_name, MAX_FILE_NAME) == 0)) {
-            // CRITICAL SECTION END inode_table
-            return dir_entry[i].d_inumber;
+            ret_value = dir_entry[i].d_inumber;
+            break;
         }
     }
-    // CRITICAL SECTION END inode_table
-    return -1;
+    if (pthread_rwlock_unlock(&(inode_table[inumber].i_rwlock)) != 0)
+        ret_value = -1;
+    return ret_value;
 }
 
 /*
